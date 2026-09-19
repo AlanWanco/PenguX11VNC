@@ -1,0 +1,25 @@
+{
+  "name": "pengux11vnc",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "PenguX11VNC: local-only noVNC viewer for an existing SSH tunnel",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test test/*.test.js",
+    "test:browser": "node test/browser.mjs",
+    "tauri:dev": "cargo run --manifest-path src-tauri/Cargo.toml",
+    "tauri:check": "cargo check --manifest-path src-tauri/Cargo.toml"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@novnc/novnc": "1.7.0",
+    "ws": "8.21.3"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "prettier": "3.9.8"
+  }
+}

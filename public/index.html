@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>PenguX11VNC · QQ 窗口连接</title>
+    <link rel="icon" href="./icon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="./style.css" />
+    <script type="module" src="./app.js"></script>
+  </head>
+  <body>
+    <header class="titlebar">
+      <div class="identity">
+        <img src="./icon.svg" alt="" />
+        <div>
+          <strong>PenguX11VNC <span>· QQ 窗口连接</span></strong
+          ><small>CachyOS · 本地窗口</small>
+        </div>
+      </div>
+      <div class="connection">
+        <i id="status-dot"></i><span id="status" role="status">未连接</span>
+      </div>
+      <nav aria-label="连接工具">
+        <button
+          id="fit"
+          class="active"
+          title="等比例适应窗口"
+          aria-pressed="true"
+        >
+          适应
+        </button>
+        <button id="actual" title="100% 原始像素" aria-pressed="false">
+          1:1
+        </button>
+        <span class="separator"></span>
+        <button id="fullscreen" title="切换全屏" aria-label="切换全屏">
+          ⛶
+        </button>
+        <button
+          id="settings-toggle"
+          title="连接设置"
+          aria-expanded="false"
+          aria-controls="settings"
+        >
+          设置
+        </button>
+        <button id="collapse" title="收起界面">收起</button>
+      </nav>
+    </header>
+    <main>
+      <div id="screen" aria-label="远程 QQ 画面"></div>
+      <button
+        id="restore-bubble"
+        class="restore-bubble"
+        title="还原界面"
+        aria-label="还原界面"
+      >
+        ◈
+      </button>
+      <img id="ime-overlay" alt="远端输入法候选框" hidden />
+      <section id="welcome" class="welcome">
+        <div class="welcome-mark"><img src="./icon.svg" alt="" /></div>
+        <span class="eyebrow">YOUR WINDOW, CLOSER.</span>
+        <h1>只连接你的 QQ。</h1>
+        <p>
+          保留 Linux 上的同一个窗口。<br />原始画质，等比例显示，滚动由你掌控。
+        </p>
+        <button id="connect" class="primary">
+          连接窗口 <span aria-hidden="true">↗</span>
+        </button>
+        <small id="welcome-hint">仅通过本机 SSH 隧道连接</small>
+      </section>
+      <aside id="settings" hidden aria-label="连接设置">
+        <div class="panel-heading">
+          <div>
+            <span class="eyebrow">MAKE IT YOURS</span>
+            <h2>连接设置</h2>
+          </div>
+          <button id="settings-close" aria-label="关闭设置">×</button>
+        </div>
+        <section class="setting-section">
+          <div class="setting-label">
+            <label for="bitrate">传输码率</label>
+            <output id="bitrate-value" for="bitrate">无损</output>
+          </div>
+          <select id="bitrate" aria-label="传输码率">
+            <option value="lossless">无损 · 画质优先</option>
+            <option value="high">高 · 约 8 级 JPEG</option>
+            <option value="balanced">均衡 · 约 6 级 JPEG</option>
+            <option value="low">低 · 约 3 级 JPEG</option>
+          </select>
+          <p class="help">
+            VNC 按画面变化压缩，不能承诺固定 Mbps；低档会启用有损
+            JPEG，默认无损。
+          </p>
+        </section>
+        <section class="setting-section">
+          <div class="setting-label">
+            <label for="frame-rate">帧率上限</label>
+            <output id="frame-rate-value" for="frame-rate">30 FPS</output>
+          </div>
+          <select id="frame-rate" aria-label="帧率上限">
+            <option value="0">不限</option>
+            <option value="5">5 FPS</option>
+            <option value="10">10 FPS</option>
+            <option value="15">15 FPS</option>
+            <option value="24">24 FPS</option>
+            <option value="30">30 FPS</option>
+            <option value="60">60 FPS</option>
+          </select>
+          <p class="help">
+            限制本地向 VNC 请求画面的频率，远端 QQ 刷新率不会被修改。
+          </p>
+        </section>
+        <section class="setting-section">
+          <div class="setting-label">
+            <label for="wheel">滚轮灵敏度</label
+            ><output id="wheel-value" for="wheel">25%</output>
+          </div>
+          <input
+            id="wheel"
+            type="range"
+            min="5"
+            max="100"
+            step="5"
+            value="25"
+          />
+          <div class="range-labels"><span>精细</span><span>快速</span></div>
+          <p class="help">
+            仅调整这条远程连接。高精度滚动先累积，再限量转发，不排队补滚。
+          </p>
+        </section>
+        <section class="setting-section">
+          <label class="toggle-row" for="view-only"
+            ><span>只看画面<small>暂时不发送键盘和鼠标</small></span
+            ><input id="view-only" type="checkbox" role="switch"
+          /></label>
+          <div class="detail-row">
+            <span>图像传输</span><b id="transport-mode">无损 · ZRLE 优先</b>
+          </div>
+          <div class="detail-row"><span>远端分辨率</span><b>保持不变</b></div>
+        </section>
+        <section class="setting-section">
+          <h3>远端输入法</h3>
+          <div class="shortcut">
+            <span>切换输入法</span><kbd>Ctrl + Space</kbd>
+          </div>
+          <div class="shortcut"><span>候选翻页</span><kbd>[ / ]</kbd></div>
+          <div class="shortcut"><span>Rime 方案</span><kbd>F11</kbd></div>
+          <p id="ime-status" class="notice">
+            连接后补采集独立候选框；不更改远端输入法主题，不捕获整个桌面。
+          </p>
+        </section>
+        <section class="setting-section">
+          <label class="toggle-row" for="clipboard-sync"
+            ><span>双向剪贴板同步<small>仅在开启后读写本机剪贴板</small></span
+            ><input id="clipboard-sync" type="checkbox" role="switch"
+          /></label>
+          <p id="clipboard-status" class="help">
+            当前关闭：不会读取或写入本机剪贴板。
+          </p>
+        </section>
+        <section id="children-section" class="setting-section">
+          <label class="toggle-row" for="child-auto-open"
+            ><span
+              >自动打开 QQ 子窗口<small
+                >只匹配 QQ 类名，不捕获整个桌面</small
+              ></span
+            ><input id="child-auto-open" type="checkbox" role="switch" checked
+          /></label>
+          <div id="child-status" class="help">连接后检查可见的 QQ 子窗口。</div>
+          <div id="child-list" class="child-list" hidden></div>
+          <button id="child-refresh" class="secondary" type="button">
+            立即刷新
+          </button>
+        </section>
+        <section class="setting-section">
+          <h3>连接档</h3>
+          <div id="profile-name" class="detail-row">
+            <span>配置</span><b>读取中</b>
+          </div>
+          <div id="profile-ssh" class="detail-row">
+            <span>SSH</span><b>读取中</b>
+          </div>
+          <p class="help">
+            配置文件：~/.config/qq-window-viewer/connections.json。私钥只由本机
+            SSH 使用。
+          </p>
+        </section>
+        <section class="setting-section">
+          <label for="clipboard">手动传送文字</label>
+          <textarea
+            id="clipboard"
+            rows="3"
+            placeholder="只发送这里的文字，不自动读取剪贴板"
+          ></textarea>
+          <button id="send-clipboard" class="secondary" disabled>
+            写入远端剪贴板
+          </button>
+          <p class="help">
+            写入后在 QQ 中手动粘贴，不会自动发送消息。中文需要服务器支持 Unicode
+            剪贴板。
+          </p>
+        </section>
+        <button id="disconnect" class="danger" disabled>断开连接</button>
+        <p class="panel-foot">noVNC 1.7 · 本地私有连接 · 不经过云端</p>
+      </aside>
+      <div id="edge-reveal" aria-hidden="true"></div>
+    </main>
+    <footer>
+      <span
+        ><i class="lock">◇</i> SSH 隧道
+        <span class="muted">/</span> 单窗口</span
+      ><span id="geometry">原始像素 · 等比例缩放</span>
+    </footer>
+    <div id="toast" role="status" hidden></div>
+    <dialog id="password-dialog">
+      <form id="password-form">
+        <span class="eyebrow">PRIVATE CONNECTION</span>
+        <h2>连接密码</h2>
+        <p>输入当前 VNC 密码。密码不会保存到浏览器。</p>
+        <label for="password">VNC 密码</label
+        ><input id="password" type="password" autocomplete="off" required />
+        <div class="dialog-actions">
+          <button id="password-cancel" type="button">取消</button
+          ><button class="primary" type="submit">连接</button>
+        </div>
+      </form>
+    </dialog>
+  </body>
+</html>

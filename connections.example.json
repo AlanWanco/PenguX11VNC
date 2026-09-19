@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "defaultConnection": "linux-qq",
+  "connections": {
+    "linux-qq": {
+      "name": "我的 Linux QQ",
+      "ssh": {
+        "user": "remote-user",
+        "host": "remote.example",
+        "port": 22,
+        "privateKeyFile": "~/.config/qq-window-viewer/keys/id_remote"
+      },
+      "tunnel": {
+        "localPort": 15900,
+        "remoteHost": "127.0.0.1",
+        "remotePort": 5900
+      },
+      "vnc": {
+        "passwordFile": "~/.config/qq-window-viewer/vnc.pass",
+        "remotePasswordFile": "/run/user/1000/x11vnc.pass"
+      },
+      "window": {
+        "display": ":0",
+        "xauthority": "/run/user/1000/xauth",
+        "id": "0x1",
+        "className": "QQ"
+      },
+      "helpers": {
+        "windowList": "/home/remote-user/.local/lib/qq-window-viewer/list-qq-windows",
+        "imeCapture": "/home/remote-user/.local/lib/qq-window-viewer/capture-ime"
+      },
+      "children": {
+        "enabled": true,
+        "autoOpen": true,
+        "minWidth": 80,
+        "minHeight": 60
+      },
+      "clipboard": {
+        "sync": false
+      },
+      "viewer": {
+        "wheel": 25,
+        "bitrate": "lossless",
+        "frameRate": 30,
+        "clipboardSync": false,
+        "autoChildOpen": true,
+        "uiCollapsed": false
+      }
+    }
+  }
+}

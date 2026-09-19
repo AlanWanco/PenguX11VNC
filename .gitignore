@@ -1,0 +1,12 @@
+node_modules/
+.runtime/
+connections.json
+*.local.json
+*.pass
+*.key
+src-tauri/target/
+src-tauri/gen/
+__pycache__/
+*.pyc
+*.backup*
+.DS_Store

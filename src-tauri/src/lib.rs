@@ -1,0 +1,222 @@
+mod manager;
+
+use manager::{load_profile, start_main_tunnel, ManagerRuntime, Profile};
+use serde_json::json;
+use std::fs::{self, OpenOptions};
+use std::io;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Mutex,
+};
+use std::thread;
+use std::time::Duration;
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+use url::Url;
+
+struct RuntimeState {
+    manager: Mutex<Option<ManagerRuntime>>,
+    main_tunnel: Mutex<Option<Child>>,
+    node: Mutex<Option<Child>>,
+    stopped: AtomicBool,
+}
+
+impl RuntimeState {
+    fn stop(&self) {
+        if self.stopped.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        if let Ok(mut node) = self.node.lock() {
+            kill_child(node.take());
+        }
+        if let Ok(mut manager) = self.manager.lock() {
+            if let Some(mut manager) = manager.take() {
+                manager.stop();
+            }
+        }
+        if let Ok(mut tunnel) = self.main_tunnel.lock() {
+            kill_child(tunnel.take());
+        }
+    }
+}
+
+impl Drop for RuntimeState {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+fn kill_child(mut child: Option<Child>) {
+    if let Some(ref mut child) = child {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+fn bridge_root(app: &AppHandle) -> io::Result<PathBuf> {
+    if let Ok(path) = std::env::var("PENGUX11VNC_ROOT") {
+        let path = PathBuf::from(path);
+        if is_bridge_root(&path) {
+            return Ok(path);
+        }
+    }
+
+    let mut candidates = vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..")];
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        candidates.push(resource_dir.join("bridge"));
+        candidates.push(resource_dir);
+    }
+    candidates
+        .into_iter()
+        .find(|path| is_bridge_root(path))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "找不到 PenguX11VNC bridge 资源（server.js/public）",
+            )
+        })
+}
+
+fn is_bridge_root(path: &Path) -> bool {
+    path.join("server.js").is_file() && path.join("public").is_dir()
+}
+
+fn write_session(root: &Path, url: &Url, pid: u32, profile: &Profile) -> io::Result<()> {
+    let runtime = root.join(".runtime");
+    fs::create_dir_all(&runtime)?;
+    let path = runtime.join("session.json");
+    fs::write(
+        &path,
+        serde_json::to_vec_pretty(&json!({
+            "url": url.as_str(),
+            "pid": pid,
+            "profile": profile.id,
+            "created": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+        }))?,
+    )?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+fn start_node(
+    root: &Path,
+    profile: &Profile,
+    manager: &ManagerRuntime,
+) -> io::Result<(Child, Url)> {
+    let runtime = root.join(".runtime");
+    fs::create_dir_all(&runtime)?;
+    let log_path = runtime.join("tauri-server.log");
+    let log = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&log_path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&log_path, fs::Permissions::from_mode(0o600))?;
+    }
+
+    let mut command =
+        Command::new(std::env::var("PENGUX11VNC_NODE").unwrap_or_else(|_| "node".to_string()));
+    command
+        .arg(root.join("server.js"))
+        .current_dir(root)
+        .env("QQ_VIEWER_PORT", "0")
+        .env("QQ_VNC_PORT", profile.local_port().to_string())
+        .env("QQ_IME_ENABLED", "1")
+        .env("QQ_CONNECTION_JSON", profile.normalized_json().to_string())
+        .env("QQ_RUST_MANAGER_URL", &manager.url)
+        .env("QQ_RUST_MANAGER_TOKEN", &manager.token)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log.try_clone()?))
+        .stderr(Stdio::from(log));
+    if let Some(password_file) = profile.local_password_file() {
+        if Path::new(&password_file).is_file() {
+            command.env("QQ_VNC_PASSWORD_FILE", password_file);
+        }
+    }
+
+    let mut child = command.spawn()?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Err(io::Error::other(format!("Node bridge 启动失败：{status}")));
+        }
+        if let Ok(text) = fs::read_to_string(&log_path) {
+            if let Some(raw_url) = text.lines().find(|line| line.starts_with("http://")) {
+                let url = Url::parse(raw_url.trim()).map_err(io::Error::other)?;
+                if url.host_str() == Some("127.0.0.1") {
+                    return Ok((child, url));
+                }
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            kill_child(Some(child));
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Node bridge 启动超时",
+            ));
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .setup(|app| {
+            let root = bridge_root(app.handle())?;
+            let profile = load_profile()?;
+            let main_tunnel = start_main_tunnel(&profile)?;
+            let manager = match ManagerRuntime::start(profile.clone()) {
+                Ok(manager) => manager,
+                Err(error) => {
+                    kill_child(main_tunnel);
+                    return Err(error.into());
+                }
+            };
+            let (node, url) = match start_node(&root, &profile, &manager) {
+                Ok(result) => result,
+                Err(error) => {
+                    let mut manager = manager;
+                    manager.stop();
+                    kill_child(main_tunnel);
+                    return Err(error.into());
+                }
+            };
+
+            write_session(&root, &url, node.id(), &profile)?;
+            app.manage(RuntimeState {
+                manager: Mutex::new(Some(manager)),
+                main_tunnel: Mutex::new(main_tunnel),
+                node: Mutex::new(Some(node)),
+                stopped: AtomicBool::new(false),
+            });
+            WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
+                .title("PenguX11VNC")
+                .inner_size(1280.0, 900.0)
+                .min_inner_size(640.0, 480.0)
+                .resizable(true)
+                .visible(true)
+                .build()?;
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            if window.label() == "main" && matches!(event, WindowEvent::CloseRequested { .. }) {
+                if let Some(state) = window.app_handle().try_state::<RuntimeState>() {
+                    state.stop();
+                }
+            }
+        })
+        .run(tauri::generate_context!())
+        .expect("error while running PenguX11VNC");
+}
