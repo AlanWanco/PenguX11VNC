@@ -21,6 +21,8 @@ let settingsReady = false;
 let settingsStamp = 0;
 let settingsSaveTimer;
 let settingsSyncTimer;
+let bubbleSaveTimer;
+let bubblePositionDirty = false;
 const defaultSettings = {
   wheel: 25,
   viewOnly: false,
@@ -384,6 +386,7 @@ function setUiCollapsed(collapsed, persist = true) {
   settings.uiCollapsed = collapsed;
   document.body.classList.toggle("ui-collapsed", collapsed);
   document.body.classList.remove("ui-peek");
+  clearTimeout(peekTimer);
   $("collapse").setAttribute("aria-pressed", String(collapsed));
   if (collapsed) {
     panel(false);
@@ -420,32 +423,59 @@ function clampBubblePosition(left, top) {
     top: Math.max(8, Math.min(maxTop, top)),
   };
 }
+function applyBubblePosition(value) {
+  if (!Number.isFinite(value?.left) || !Number.isFinite(value?.top)) return;
+  const position = clampBubblePosition(value.left, value.top);
+  restoreBubble.style.left = `${position.left}px`;
+  restoreBubble.style.top = `${position.top}px`;
+  restoreBubble.style.right = "auto";
+  restoreBubble.style.bottom = "auto";
+}
+function currentBubblePosition() {
+  const rect = restoreBubble.getBoundingClientRect();
+  return { left: Math.round(rect.left), top: Math.round(rect.top) };
+}
 function saveBubblePosition() {
+  const position = currentBubblePosition();
+  bubblePositionDirty = true;
   try {
     localStorage.setItem(
       `qq-viewer-bubble-${sessionId}`,
-      JSON.stringify({
-        left: restoreBubble.offsetLeft,
-        top: restoreBubble.offsetTop,
-      }),
+      JSON.stringify(position),
     );
   } catch {
     /* Storage is optional. */
   }
+  clearTimeout(bubbleSaveTimer);
+  bubbleSaveTimer = setTimeout(async () => {
+    try {
+      await api(`/api/layout?session=${encodeURIComponent(sessionId)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ position }),
+      });
+    } catch {
+      // localStorage remains a fallback for the current browser profile.
+    }
+  }, 120);
 }
-function restoreBubblePosition() {
+async function restoreBubblePosition() {
   try {
     const saved = JSON.parse(
       localStorage.getItem(`qq-viewer-bubble-${sessionId}`) || "null",
     );
-    if (!Number.isFinite(saved?.left) || !Number.isFinite(saved?.top)) return;
-    const position = clampBubblePosition(saved.left, saved.top);
-    restoreBubble.style.left = `${position.left}px`;
-    restoreBubble.style.top = `${position.top}px`;
-    restoreBubble.style.right = "auto";
-    restoreBubble.style.bottom = "auto";
+    applyBubblePosition(saved);
   } catch {
     /* Storage is optional. */
+  }
+  try {
+    const response = await api(
+      `/api/layout?session=${encodeURIComponent(sessionId)}`,
+    );
+    if (response.ok && !bubblePositionDirty)
+      applyBubblePosition((await response.json()).position);
+  } catch {
+    // The local fallback is sufficient if the API is unavailable.
   }
 }
 restoreBubble.addEventListener("pointerdown", (event) => {
@@ -891,18 +921,22 @@ document.addEventListener("pointerdown", (event) => {
 });
 $("collapse").addEventListener("click", () => setUiCollapsed(true));
 let peekTimer;
+function schedulePeekHide() {
+  clearTimeout(peekTimer);
+  if (
+    !document.body.classList.contains("ui-collapsed") ||
+    !document.body.classList.contains("ui-peek")
+  )
+    return;
+  peekTimer = setTimeout(() => {
+    document.body.classList.remove("ui-peek");
+    peekTimer = undefined;
+  }, 900);
+}
 document.addEventListener("mousemove", (event) => {
   if (!document.body.classList.contains("ui-collapsed")) return;
-  if (event.clientY <= 16) {
-    document.body.classList.add("ui-peek");
-    clearTimeout(peekTimer);
-  } else if (!event.target.closest(".titlebar")) {
-    clearTimeout(peekTimer);
-    peekTimer = setTimeout(
-      () => document.body.classList.remove("ui-peek"),
-      700,
-    );
-  }
+  if (event.clientY <= 16) document.body.classList.add("ui-peek");
+  schedulePeekHide();
 });
 $("fullscreen").addEventListener("click", async () => {
   try {
@@ -946,6 +980,20 @@ window.addEventListener("pagehide", () => {
   stopClipboardSync();
   stopChildMonitor();
   clearTimeout(settingsSyncTimer);
+  if (bubblePositionDirty && token) {
+    clearTimeout(bubbleSaveTimer);
+    fetch(
+      `/api/layout?session=${encodeURIComponent(sessionId)}&token=${encodeURIComponent(token)}`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ position: currentBubblePosition() }),
+        keepalive: true,
+      },
+    ).catch(() => {});
+  } else {
+    clearTimeout(bubbleSaveTimer);
+  }
   if (isMainSession && settingsReady && token) {
     clearTimeout(settingsSaveTimer);
     fetch(`/api/settings?session=main&token=${encodeURIComponent(token)}`, {

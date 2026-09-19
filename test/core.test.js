@@ -124,6 +124,19 @@ test("viewer settings persist for the main session", async (t) => {
     autoChildOpen: true,
     uiCollapsed: false,
   });
+  const layoutSaved = await fetch(`${app.origin}/api/layout?session=main`, {
+    method: "PUT",
+    headers,
+    body: JSON.stringify({ position: { left: 321.4, top: 654.6 } }),
+  });
+  assert.equal(layoutSaved.status, 200);
+  const layoutLoaded = await fetch(`${app.origin}/api/layout?session=main`, {
+    headers,
+  });
+  assert.deepEqual((await layoutLoaded.json()).position, {
+    left: 321,
+    top: 655,
+  });
 });
 
 test("VNC password decoding works without exposing the password", () => {

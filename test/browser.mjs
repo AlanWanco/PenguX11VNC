@@ -193,6 +193,15 @@ try {
     30,
   );
   assert.equal(await page.locator("#restore-bubble").isVisible(), true);
+  await page.mouse.move(20, 4);
+  await page.waitForTimeout(1100);
+  assert.equal(
+    await page
+      .locator("body")
+      .evaluate((node) => node.classList.contains("ui-peek")),
+    false,
+    "Peek UI did not auto-collapse",
+  );
   const bubble = await page.locator("#restore-bubble").boundingBox();
   await page.mouse.move(
     bubble.x + bubble.width / 2,

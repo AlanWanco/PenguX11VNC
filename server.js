@@ -81,6 +81,31 @@ async function loadViewerSettings(settingsPath, profileId) {
   }
 }
 
+function normalizeBubblePosition(value) {
+  const left = Number(value?.left);
+  const top = Number(value?.top);
+  if (
+    !Number.isFinite(left) ||
+    !Number.isFinite(top) ||
+    left < 0 ||
+    top < 0 ||
+    left > 100000 ||
+    top > 100000
+  )
+    return null;
+  return { left: Math.round(left), top: Math.round(top) };
+}
+
+async function saveViewerDocument(settingsPath, document) {
+  await mkdir(path.dirname(settingsPath), { recursive: true, mode: 0o700 });
+  const temporary = `${settingsPath}.${process.pid}.tmp`;
+  await writeFile(temporary, JSON.stringify(document, null, 2), {
+    mode: 0o600,
+  });
+  await chmod(temporary, 0o600);
+  await rename(temporary, settingsPath);
+}
+
 async function saveViewerSettings(settingsPath, profileId, value) {
   let document = { version: 1, profiles: {} };
   try {
@@ -94,17 +119,50 @@ async function saveViewerSettings(settingsPath, profileId, value) {
   document.version = 1;
   document.profiles[profileId] = normalizeViewerSettings(value);
   document.updatedAt = Date.now();
-  await mkdir(path.dirname(settingsPath), { recursive: true, mode: 0o700 });
-  const temporary = `${settingsPath}.${process.pid}.tmp`;
-  await writeFile(temporary, JSON.stringify(document, null, 2), {
-    mode: 0o600,
-  });
-  await chmod(temporary, 0o600);
-  await rename(temporary, settingsPath);
+  await saveViewerDocument(settingsPath, document);
   return {
     settings: document.profiles[profileId],
     updatedAt: document.updatedAt,
   };
+}
+
+async function loadViewerLayout(settingsPath, profileId, sessionId) {
+  try {
+    const document = JSON.parse(await readFile(settingsPath, "utf8"));
+    return {
+      position: normalizeBubblePosition(
+        document?.layouts?.[profileId]?.[sessionId],
+      ),
+      updatedAt: Number(document?.updatedAt) || 0,
+    };
+  } catch (error) {
+    if (error.code === "ENOENT") return { position: null, updatedAt: 0 };
+    return { position: null, updatedAt: 0 };
+  }
+}
+
+async function saveViewerLayout(settingsPath, profileId, sessionId, value) {
+  const position = normalizeBubblePosition(value);
+  if (!position) throw new Error("Invalid bubble position");
+  let document = { version: 1, profiles: {}, layouts: {} };
+  try {
+    const existing = JSON.parse(await readFile(settingsPath, "utf8"));
+    if (existing && typeof existing === "object") document = existing;
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  if (!document.layouts || typeof document.layouts !== "object")
+    document.layouts = {};
+  if (
+    !document.layouts[profileId] ||
+    typeof document.layouts[profileId] !== "object"
+  )
+    document.layouts[profileId] = {};
+  document.version = 1;
+  document.layouts[profileId][sessionId] = position;
+  document.updatedAt = Date.now();
+  await saveViewerDocument(settingsPath, document);
+  return { position, updatedAt: document.updatedAt };
 }
 
 async function requestBody(req, limit = 64 * 1024) {
@@ -545,6 +603,29 @@ export async function startServer({
           body.settings || body,
         );
         return json(res, 200, saved);
+      }
+      if (url.pathname === "/api/layout") {
+        const session = getSession(sessionId);
+        if (!session) return json(res, 404, { error: "session-not-found" });
+        if (req.method === "GET")
+          return json(
+            res,
+            200,
+            await loadViewerLayout(settingsPath, profile.id, sessionId),
+          );
+        if (req.method !== "PUT")
+          return json(res, 405, { error: "method-not-allowed" });
+        const body = await requestBody(req);
+        return json(
+          res,
+          200,
+          await saveViewerLayout(
+            settingsPath,
+            profile.id,
+            sessionId,
+            body.position,
+          ),
+        );
       }
       if (url.pathname === "/api/windows" && req.method === "GET") {
         if (sessionId !== "main")
