@@ -199,10 +199,10 @@ jobs:
           compression-level: 0
 
   build-linux-arm64:
-    name: Build linux-arm64 (QEMU)
+    name: Build linux-arm64 (native)
     needs: quality
-    runs-on: ubuntu-24.04
-    timeout-minutes: 150
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -210,50 +210,52 @@ jobs:
         id: metadata
         shell: bash
         run: echo "short_sha=${GITHUB_SHA:0:12}" >> "$GITHUB_OUTPUT"
-      - name: Enable ARM64 emulation
-        uses: docker/setup-qemu-action@v3
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
         with:
-          platforms: arm64
-      - name: Build inside an ARM64 userspace
-        env:
-          WORKSPACE: ${{ github.workspace }}
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Linux build dependencies
         run: |
-          docker run --rm --platform linux/arm64 \
-            -e NODE_VERSION="$NODE_VERSION" \
-            -e SHORT_SHA="${{ steps.metadata.outputs.short_sha }}" \
-            -e APPIMAGE_EXTRACT_AND_RUN=1 \
-            -v "$WORKSPACE:/workspace" \
-            -w /workspace \
-            ubuntu:24.04 \
-            bash -euxo pipefail -c '
-              apt-get update
-              DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-                build-essential ca-certificates curl file git python3 xz-utils \
-                libayatana-appindicator3-dev libgtk-3-dev libssl-dev \
-                libwebkit2gtk-4.1-dev libxdo-dev librsvg2-dev patchelf
-              node_archive="node-v${NODE_VERSION}-linux-arm64.tar.xz"
-              node_url="https://nodejs.org/dist/v${NODE_VERSION}/${node_archive}"
-              curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt" -o /tmp/SHASUMS256.txt
-              expected="$(awk -v name="$node_archive" "(\$2 == name) { print \$1 }" /tmp/SHASUMS256.txt)"
-              test -n "$expected"
-              curl -fsSL "$node_url" -o "/tmp/$node_archive"
-              printf "%s  %s\\n" "$expected" "/tmp/$node_archive" | sha256sum -c -
-              tar -xJf "/tmp/$node_archive" -C /opt
-              mv "/opt/node-v${NODE_VERSION}-linux-arm64" /opt/node
-              export PATH="/opt/node/bin:$PATH"
-              node --version
-              npm --version
-              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-              . "$HOME/.cargo/env"
-              rustup target add aarch64-unknown-linux-gnu
-              npm ci
-              python3 tools/stage-node-runtime.py --version "$NODE_VERSION" --platform linux --arch arm64
-              npm run tauri:build -- --target aarch64-unknown-linux-gnu --bundles appimage
-              python3 tools/collect-bundle.py \
-                --bundle-root src-tauri/target/aarch64-unknown-linux-gnu/release/bundle/appimage \
-                --bundle appimage \
-                --name "PenguX11VNC-linux-arm64-${SHORT_SHA}"
-            '
+          sudo apt-get update
+          sudo apt-get install -y \
+            libayatana-appindicator3-dev \
+            libgtk-3-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            librsvg2-dev \
+            patchelf
+      - name: Install Rust target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: aarch64-unknown-linux-gnu
+      - name: Install JavaScript dependencies
+        run: npm ci
+      - name: Stage target Node.js runtime
+        shell: bash
+        run: |
+          python tools/stage-node-runtime.py \
+            --version "$NODE_VERSION" \
+            --platform linux \
+            --arch arm64
+      - name: Build native ARM64 installer
+        shell: bash
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: |
+          npm run tauri:build -- \
+            --target aarch64-unknown-linux-gnu \
+            --bundles appimage
+          python tools/collect-bundle.py \
+            --bundle-root src-tauri/target/aarch64-unknown-linux-gnu/release/bundle/appimage \
+            --bundle appimage \
+            --name "PenguX11VNC-linux-arm64-${{ steps.metadata.outputs.short_sha }}"
       - name: Write build summary
         run: |
           python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
@@ -263,7 +265,7 @@ jobs:
           digest = hashlib.sha256(path.read_bytes()).hexdigest()
           print(f"### {path.name}")
           print("- Target: `aarch64-unknown-linux-gnu`")
-          print("- Build userspace: `linux/arm64` under QEMU")
+          print("- Build runner: `ubuntu-24.04-arm` native ARM64")
           print(f"- SHA-256: `{digest}`")
           print("- Download: this job's `PenguX11VNC-linux-arm64-${{ steps.metadata.outputs.short_sha }}` artifact")
           print("- Unsigned debug bundle; install/use only on a trusted test machine.")
