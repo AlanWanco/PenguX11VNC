@@ -345,6 +345,8 @@ export async function startServer({
   const canManageRemoteWindows =
     Boolean(rustManager) || (Boolean(connection) && profile.children.enabled);
   const childProcesses = new Map();
+  // Session-only VNC credential cache. Never persist or log this value.
+  let cachedVncPassword;
 
   function validRequest(req) {
     return (
@@ -590,6 +592,7 @@ export async function startServer({
         if (data.profile) {
           profile = normalizeConnection(data.profile, data.profile.id);
           passwordFile = undefined;
+          cachedVncPassword = undefined;
         }
         const main = getSession("main");
         if (data.state === "ready") {
@@ -629,6 +632,27 @@ export async function startServer({
             })
           : json(res, 404, { error: "session-not-found" });
       }
+      if (url.pathname === "/api/credentials/cache") {
+        const session = getSession(sessionId);
+        if (!session) return json(res, 404, { error: "session-not-found" });
+        if (req.method === "DELETE") {
+          cachedVncPassword = undefined;
+          return json(res, 200, { ok: true });
+        }
+        if (req.method !== "POST")
+          return json(res, 405, { error: "method-not-allowed" });
+        const body = await requestBody(req, 4096);
+        const password = body.password;
+        if (
+          typeof password !== "string" ||
+          !password ||
+          password.includes("\0") ||
+          Buffer.byteLength(password, "utf8") > 128
+        )
+          return json(res, 400, { error: "invalid-vnc-password" });
+        cachedVncPassword = password;
+        return json(res, 200, { ok: true });
+      }
       if (url.pathname === "/api/credentials") {
         const session = getSession(sessionId);
         if (!session) return json(res, 404, { error: "session-not-found" });
@@ -637,6 +661,7 @@ export async function startServer({
           password = await readVncPassword(
             passwordFile || profile.vnc.passwordFile,
           );
+        if (password === undefined) password = cachedVncPassword;
         return json(res, 200, password === undefined ? {} : { password });
       }
       if (url.pathname === "/api/session") {
@@ -823,6 +848,7 @@ export async function startServer({
         await cleanupSession(session);
       for (const ws of wss.clients) ws.terminate();
       for (const socket of sockets) socket.destroy();
+      cachedVncPassword = undefined;
       await new Promise((resolve) => server.close(resolve));
       wss.close();
     },

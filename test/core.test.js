@@ -177,6 +177,38 @@ function request(origin, path, headers = {}) {
     req.on("error", reject);
   });
 }
+test("VNC credentials are shared in memory and cleared on request", async (t) => {
+  const app = await startServer({ port: 0 });
+  t.after(() => app.close());
+  const headers = {
+    "X-QQ-Token": app.token,
+    "Content-Type": "application/json",
+  };
+  const saved = await fetch(
+    `${app.origin}/api/credentials/cache?session=main`,
+    {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ password: "test123" }),
+    },
+  );
+  assert.equal(saved.status, 200);
+  const loaded = await fetch(`${app.origin}/api/credentials?session=main`, {
+    headers,
+  });
+  assert.equal(loaded.status, 200);
+  assert.deepEqual(await loaded.json(), { password: "test123" });
+  const cleared = await fetch(
+    `${app.origin}/api/credentials/cache?session=main`,
+    { method: "DELETE", headers },
+  );
+  assert.equal(cleared.status, 200);
+  const empty = await fetch(`${app.origin}/api/credentials?session=main`, {
+    headers,
+  });
+  assert.deepEqual(await empty.json(), {});
+});
+
 test("local server restricts API, Origin, Host, static files and WebSocket access", async (t) => {
   const app = await startServer({ port: 0 });
   t.after(() => app.close());

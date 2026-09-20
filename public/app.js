@@ -293,6 +293,24 @@ async function api(path, options = {}) {
   headers.set("X-QQ-Token", token || "");
   return fetch(path, { ...options, headers });
 }
+function credentialCachePath() {
+  return `/api/credentials/cache?session=${encodeURIComponent(sessionId)}`;
+}
+async function cacheVncPassword(password) {
+  const response = await api(credentialCachePath(), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ password }),
+  });
+  if (!response.ok) throw new Error("本次运行无法缓存 VNC 密码");
+}
+async function clearVncPasswordCache() {
+  try {
+    await api(credentialCachePath(), { method: "DELETE" });
+  } catch {
+    /* The cache is still cleared when the local server exits. */
+  }
+}
 
 async function loadPersistentSettings() {
   try {
@@ -813,7 +831,7 @@ async function connect(prepare = true) {
       `${location.origin.replace("http:", "ws:")}/vnc?session=${encodeURIComponent(sessionId)}&token=${encodeURIComponent(token)}`,
       { credentials, shared: true },
     );
-    // noVNC retains its own credentials only for this live connection.
+    // The local server may provide the session-only credential to child RFB sessions.
     credentials = null;
     rfb = client;
     client.background = "#131217";
@@ -828,6 +846,7 @@ async function connect(prepare = true) {
       $("password").focus();
     });
     client.addEventListener("securityfailure", () => {
+      void clearVncPasswordCache();
       stopMainConnection().catch(() => {});
       toast("VNC 认证失败，已停止自动重试。请检查密码后重新连接。");
     });
@@ -1067,9 +1086,18 @@ document.addEventListener("fullscreenchange", () =>
     Boolean(document.fullscreenElement),
   ),
 );
-$("password-form").addEventListener("submit", (event) => {
+$("password-form").addEventListener("submit", async (event) => {
   event.preventDefault();
-  rfb?.sendCredentials({ password: $("password").value });
+  const password = $("password").value;
+  const client = rfb;
+  if (password) {
+    try {
+      await cacheVncPassword(password);
+    } catch {
+      // Still authenticate this connection if the optional cache is unavailable.
+    }
+  }
+  client?.sendCredentials({ password });
   $("password").value = "";
   $("password-dialog").close();
 });

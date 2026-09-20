@@ -103,10 +103,14 @@
               <code>~/.config/qq-window-viewer/vnc.pass</code>，不需要猜路径。
             </p>
           </details>
-          <button type="submit" id="setup-probe" class="primary">
+          <button type="submit" id="setup-probe" class="primary setup-action">
             2 · 运行只读预检
           </button>
-          <button type="button" id="setup-draft-save" class="secondary">
+          <button
+            type="button"
+            id="setup-draft-save"
+            class="secondary setup-action"
+          >
             保存填写内容（暂不连接）
           </button>
           <p class="help">
@@ -145,7 +149,7 @@
           为所选窗口启动仅监听 localhost 的
           x11vnc，并在断开时清理本工具创建的进程；不接管已有 VNC 服务。</label
         >
-        <button id="setup-save" class="primary" disabled>
+        <button id="setup-save" class="primary setup-action" disabled>
           4 · 保存配置，返回连接
         </button>
       </section>
