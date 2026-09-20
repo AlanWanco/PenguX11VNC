@@ -143,6 +143,28 @@ nav {
   font-size: 22px;
   line-height: 20px;
 }
+.window-close-control {
+  display: none;
+  color: #f3a8b6;
+  font-size: 20px;
+  line-height: 18px;
+  padding: 6px 10px;
+}
+body.no-system-titlebar .window-close-control {
+  display: inline-flex;
+}
+body.no-system-titlebar .titlebar {
+  cursor: grab;
+  user-select: none;
+}
+body.no-system-titlebar .titlebar:active {
+  cursor: grabbing;
+}
+body.no-system-titlebar .titlebar button,
+body.no-system-titlebar .titlebar input,
+body.no-system-titlebar .titlebar select {
+  cursor: pointer;
+}
 main {
   flex: 1;
   min-height: 0;
@@ -161,6 +183,17 @@ main {
 }
 #screen canvas {
   outline: none;
+}
+body.tauri-vnc-frame #screen {
+  inset: 0;
+  overflow: hidden;
+  border-radius: 0;
+}
+body.tauri-vnc-frame #screen > div {
+  border-radius: 0;
+}
+body.tauri-vnc-frame main {
+  background: #000;
 }
 #ime-overlay {
   position: absolute;
@@ -229,6 +262,18 @@ body.ui-collapsed #screen {
 }
 body.ui-collapsed .restore-bubble {
   display: grid;
+}
+body.no-system-titlebar.ui-collapsed .titlebar {
+  position: relative;
+  inset: auto;
+  height: 68px;
+  padding: 0 22px;
+  border-bottom: 1px solid var(--border);
+  transform: none;
+  pointer-events: auto;
+}
+body.no-system-titlebar.ui-collapsed .restore-bubble {
+  bottom: 42px;
 }
 body.ui-collapsed.ui-peek .titlebar {
   position: fixed;

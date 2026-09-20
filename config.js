@@ -42,6 +42,7 @@ const legacyConnection = {
     clipboardSync: false,
     autoChildOpen: true,
     uiCollapsed: false,
+    systemTitlebar: true,
   },
 };
 
@@ -158,6 +159,7 @@ export function normalizeConnection(raw = {}, id = "connection") {
       clipboardSync: viewer.clipboardSync === true,
       autoChildOpen: viewer.autoChildOpen !== false,
       uiCollapsed: viewer.uiCollapsed === true,
+      systemTitlebar: viewer.systemTitlebar !== false,
     },
   };
 }

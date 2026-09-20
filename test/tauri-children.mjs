@@ -13,10 +13,15 @@ function installTauriFixture(permissions) {
     destroyCalls: 0,
     holdDestruction: false,
     pending: new Set(),
+    sizeCalls: [],
+    decorationCalls: [],
+    dragCalls: 0,
+    createdUrls: [],
   };
   class WebviewWindow {
-    constructor(label) {
+    constructor(label, options = {}) {
       this.label = label;
+      fixture.createdUrls.push({ label, url: options.url });
       this.listeners = new Map();
       windows.set(label, this);
       queueMicrotask(() => this.emit("tauri://created"));
@@ -67,7 +72,32 @@ function installTauriFixture(permissions) {
       this.emit("tauri://destroyed");
     }
   }
-  window.__TAURI__ = { webviewWindow: { WebviewWindow } };
+  class LogicalSize {
+    constructor(width, height) {
+      this.type = "Logical";
+      this.width = width;
+      this.height = height;
+    }
+  }
+  const currentWindow = {
+    async setSize(size) {
+      fixture.sizeCalls.push({ width: size.width, height: size.height });
+    },
+    async setDecorations(value) {
+      fixture.decorationCalls.push(value);
+    },
+    async startDragging() {
+      fixture.dragCalls++;
+    },
+    async close() {},
+  };
+  window.__TAURI__ = {
+    webviewWindow: { WebviewWindow },
+    window: {
+      LogicalSize,
+      getCurrentWindow: () => currentWindow,
+    },
+  };
   window.tauriFixture = fixture;
 }
 
@@ -126,10 +156,61 @@ export async function testTauriChildren(browser, app) {
     await page.waitForFunction(
       () => document.querySelector("#status").textContent === "已连接",
     );
+    await page.waitForFunction(() => window.tauriFixture.sizeCalls.length > 0);
+    const fitted = await page.evaluate(() => {
+      const size = window.tauriFixture.sizeCalls.at(-1);
+      const canvas = document.querySelector("canvas");
+      const titlebar = document.querySelector(".titlebar").offsetHeight;
+      const footer = document.querySelector("footer").offsetHeight;
+      return {
+        size,
+        contentHeight: size.height - titlebar - footer,
+        canvasWidth: canvas.width,
+        canvasHeight: canvas.height,
+        decorations: window.tauriFixture.decorationCalls.at(-1),
+      };
+    });
+    assert.equal(fitted.decorations, true);
+    assert(
+      Math.abs(
+        fitted.size.width / fitted.contentHeight -
+          fitted.canvasWidth / fitted.canvasHeight,
+      ) < 0.01,
+      "Tauri VNC client area must preserve the framebuffer aspect ratio",
+    );
+    await page.click("#settings-toggle");
+    await page.uncheck("#system-titlebar");
+    await page.waitForFunction(
+      () => window.tauriFixture.decorationCalls.at(-1) === false,
+    );
+    assert.equal(
+      await page.evaluate(() =>
+        document.body.classList.contains("no-system-titlebar"),
+      ),
+      true,
+    );
+    await page.check("#system-titlebar");
+    await page.waitForFunction(
+      () => window.tauriFixture.decorationCalls.at(-1) === true,
+    );
+    await page.click("#settings-close");
 
     // Linux QQ disappears: the main viewer closes the corresponding native window.
     visible = [info("0x2")];
     await waitOpen("0x2");
+    const childUrl = await page.evaluate(
+      () =>
+        window.tauriFixture.createdUrls.find(
+          (item) => item.label === "qq-child-2",
+        ).url,
+    );
+    assert(
+      Math.abs(
+        Number(new URL(childUrl).searchParams.get("vncScale")) -
+          fitted.size.width / fitted.canvasWidth,
+      ) < 0.002,
+      "Child Tauri window must inherit the main VNC scale",
+    );
     visible = [];
     await waitClosed();
 

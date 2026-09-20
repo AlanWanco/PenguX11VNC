@@ -46,6 +46,14 @@
           设置
         </button>
         <button id="collapse" title="收起界面">收起</button>
+        <button
+          id="window-close"
+          class="window-close-control"
+          title="关闭窗口"
+          aria-label="关闭窗口"
+        >
+          ×
+        </button>
       </nav>
     </header>
     <main>
@@ -164,6 +172,12 @@
           <p id="clipboard-status" class="help">
             当前关闭：不会读取或写入本机剪贴板。
           </p>
+        </section>
+        <section class="setting-section">
+          <label class="toggle-row" for="system-titlebar"
+            ><span>系统标题栏<small>关闭后使用顶部栏拖动和关闭窗口</small></span
+            ><input id="system-titlebar" type="checkbox" role="switch" checked
+          /></label>
         </section>
         <section id="children-section" class="setting-section">
           <label class="toggle-row" for="child-auto-open"

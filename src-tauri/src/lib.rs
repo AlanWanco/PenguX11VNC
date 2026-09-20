@@ -222,7 +222,7 @@ pub fn run() {
             if let Err(error) = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
                 .title("PenguX11VNC")
                 .inner_size(1280.0, 900.0)
-                .min_inner_size(640.0, 480.0)
+                .min_inner_size(320.0, 200.0)
                 .resizable(true)
                 .visible(true)
                 .build()

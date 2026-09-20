@@ -12,6 +12,7 @@ let resizeObserver;
 let imeOverlay;
 let childTimer;
 let childPollInFlight = false;
+const childPollIntervalMs = 1000;
 let clipboardTimer;
 let token;
 let setupAvailable = false;
@@ -19,8 +20,15 @@ let connectionWanted = false;
 let recoveryTimer;
 let recoveryEpoch = 0;
 let sessionReady;
-const sessionId = new URLSearchParams(location.search).get("session") || "main";
+const queryParameters = new URLSearchParams(location.search);
+const sessionId = queryParameters.get("session") || "main";
 const isMainSession = sessionId === "main";
+const requestedTauriScale = (() => {
+  const value = Number(queryParameters.get("vncScale"));
+  return Number.isFinite(value) && value > 0 && value <= 1 ? value : undefined;
+})();
+let tauriVncScaleFactor = requestedTauriScale;
+let preferredTauriScale = requestedTauriScale;
 let localClipboardValue;
 let remoteClipboardValue;
 let hasSavedSettings = false;
@@ -39,6 +47,7 @@ const defaultSettings = {
   clipboardSync: false,
   autoChildOpen: true,
   uiCollapsed: false,
+  systemTitlebar: true,
 };
 let settings = { ...defaultSettings };
 let settingsChannel;
@@ -64,6 +73,7 @@ function normalizeSettings(value = {}) {
     clipboardSync: value.clipboardSync === true,
     autoChildOpen: value.autoChildOpen !== false,
     uiCollapsed: value.uiCollapsed === true,
+    systemTitlebar: value.systemTitlebar !== false,
   };
 }
 try {
@@ -90,7 +100,7 @@ function save() {
   } catch {
     /* Storage is optional. */
   }
-  settingsChannel?.postMessage({ settings });
+  settingsChannel?.postMessage({ settings, tauriScale: tauriVncScaleFactor });
   clearTimeout(settingsSaveTimer);
   settingsSaveTimer = setTimeout(async () => {
     try {
@@ -110,8 +120,14 @@ function save() {
 }
 if (settingsChannel) {
   settingsChannel.onmessage = (event) => {
-    if (!isMainSession && event.data?.settings)
-      applySettings(event.data.settings);
+    if (isMainSession) return;
+    if (event.data?.settings) applySettings(event.data.settings);
+    const scale = Number(event.data?.tauriScale);
+    if (Number.isFinite(scale) && scale > 0 && scale <= 1) {
+      preferredTauriScale = scale;
+      tauriVncResizeKey = undefined;
+      if (connected) geometry();
+    }
   };
 }
 
@@ -148,6 +164,8 @@ function syncSettingsControls() {
   $("view-only").checked = settings.viewOnly;
   $("clipboard-sync").checked = settings.clipboardSync;
   $("child-auto-open").checked = settings.autoChildOpen;
+  $("system-titlebar").checked = settings.systemTitlebar;
+  void applyTauriTitlebar(settings.systemTitlebar);
   if (rfb) rfb.wheelSensitivity = settings.wheel / 100;
   setBitrate(settings.bitrate, false);
   setFrameRate(settings.frameRate, false);
@@ -276,6 +294,103 @@ function resizeWindowToAspect() {
     // Browser app windows may refuse scripted resizing; CSS fitting still applies.
   }
 }
+let tauriDecorationsState;
+let tauriVncResizeKey;
+let tauriVncResizeInFlight = false;
+function currentTauriWindow() {
+  return globalThis.__TAURI__?.window?.getCurrentWindow?.();
+}
+function tauriLogicalSize(width, height) {
+  const LogicalSize =
+    globalThis.__TAURI__?.window?.LogicalSize ||
+    globalThis.__TAURI__?.dpi?.LogicalSize;
+  return typeof LogicalSize === "function"
+    ? new LogicalSize(width, height)
+    : { type: "Logical", width, height };
+}
+async function applyTauriTitlebar(decorated, notify = false) {
+  const current = currentTauriWindow();
+  const supported = isTauriShell() && Boolean(current?.setDecorations);
+  document.body.classList.toggle("no-system-titlebar", supported && !decorated);
+  if (!supported) return true;
+  if (tauriDecorationsState === decorated) return true;
+  try {
+    await current.setDecorations(decorated);
+    tauriDecorationsState = decorated;
+    tauriVncResizeKey = undefined;
+    void resizeTauriWindowToVnc();
+    return true;
+  } catch (error) {
+    if (notify) toast(`系统标题栏设置失败：${error.message || "权限不足"}`);
+    return false;
+  }
+}
+async function resizeTauriWindowToVnc() {
+  const canvas = $("screen").querySelector("canvas");
+  const current = currentTauriWindow();
+  if (
+    !isTauriShell() ||
+    !current?.setSize ||
+    !canvas?.width ||
+    !canvas.height ||
+    document.fullscreenElement
+  ) {
+    document.body.classList.remove("tauri-vnc-frame");
+    tauriVncResizeKey = undefined;
+    return;
+  }
+  document.body.classList.add("tauri-vnc-frame");
+  const titlebarHeight = Math.ceil(
+    document.querySelector(".titlebar").getBoundingClientRect().height,
+  );
+  const footerHeight = Math.ceil(
+    $("geometry").parentElement.getBoundingClientRect().height,
+  );
+  const availableWidth = Math.max(
+    320,
+    (window.screen?.availWidth || window.innerWidth) - 24,
+  );
+  const availableHeight = Math.max(
+    240,
+    (window.screen?.availHeight || window.innerHeight) -
+      titlebarHeight -
+      footerHeight -
+      24,
+  );
+  const autoScaleFactor =
+    settings.scale === "actual"
+      ? 1
+      : Math.min(
+          1,
+          availableWidth / canvas.width,
+          availableHeight / canvas.height,
+        );
+  const scaleFactor = preferredTauriScale || autoScaleFactor;
+  if (isMainSession) {
+    const changed =
+      tauriVncScaleFactor === undefined ||
+      Math.abs(tauriVncScaleFactor - scaleFactor) > 0.001;
+    tauriVncScaleFactor = scaleFactor;
+    if (changed)
+      settingsChannel?.postMessage({ tauriScale: tauriVncScaleFactor });
+  }
+  const width = Math.max(1, Math.round(canvas.width * scaleFactor));
+  const height = Math.max(1, Math.round(canvas.height * scaleFactor));
+  const innerHeight = height + titlebarHeight + footerHeight;
+  const key = `${canvas.width}x${canvas.height}:${width}x${innerHeight}:${settings.systemTitlebar}`;
+  if (tauriVncResizeKey === key || tauriVncResizeInFlight) return;
+  tauriVncResizeKey = key;
+  tauriVncResizeInFlight = true;
+  try {
+    await current.setSize(tauriLogicalSize(width, innerHeight));
+  } catch (error) {
+    tauriVncResizeKey = undefined;
+    if (settingsReady)
+      toast(`自动调整窗口失败：${error.message || "权限不足"}`);
+  } finally {
+    tauriVncResizeInFlight = false;
+  }
+}
 function geometry() {
   const canvas = $("screen").querySelector("canvas");
   if (!canvas?.width) return;
@@ -286,6 +401,7 @@ function geometry() {
     `${canvas.width} × ${canvas.height} · ${percent}% · ${bitrateLabels[settings.bitrate]} · ${frameRateLabels[settings.frameRate]}`;
   fitCollapsedScreen();
   resizeWindowToAspect();
+  void resizeTauriWindowToVnc();
   imeOverlay?.position();
 }
 async function api(path, options = {}) {
@@ -393,6 +509,7 @@ async function loadSessionInfo() {
         "view-only",
         "clipboard-sync",
         "child-auto-open",
+        "system-titlebar",
         "collapse",
       ])
         $(id).disabled = true;
@@ -635,10 +752,10 @@ async function createTauriChildWindow(info, url) {
   const child = new WebviewWindow(label, {
     url: new URL(url, location.origin).toString(),
     title: `PenguX11VNC · QQ 子窗口 · ${info.id}`,
-    width: Math.max(500, Math.min(1600, info.width + 50)),
-    height: Math.max(400, Math.min(1200, info.height + 100)),
-    minWidth: 500,
-    minHeight: 400,
+    width: Math.max(320, Math.min(1600, info.width)),
+    height: Math.max(240, Math.min(1200, info.height)),
+    minWidth: 320,
+    minHeight: 200,
     resizable: true,
   });
   await new Promise((resolve, reject) => {
@@ -716,8 +833,14 @@ async function openChildWindow(info, userInitiated = false) {
     );
     if (!opened.ok) throw new Error("子窗口 VNC 会话启动失败");
     const data = await opened.json();
-    if (tauri) child = await createTauriChildWindow(info, data.url);
-    else child.location.href = data.url;
+    let childUrl = data.url;
+    if (tauri && Number.isFinite(tauriVncScaleFactor)) {
+      const url = new URL(data.url, location.origin);
+      url.searchParams.set("vncScale", tauriVncScaleFactor.toFixed(6));
+      childUrl = url.toString();
+    }
+    if (tauri) child = await createTauriChildWindow(info, childUrl);
+    else child.location.href = childUrl;
     const entry = {
       window: child,
       tauri,
@@ -792,8 +915,12 @@ function startChildMonitor() {
   if (!isMainSession) return;
   const tick = async () => {
     if (!connected || !isMainSession) return;
+    const startedAt = performance.now();
     await pollChildWindows();
-    if (connected && isMainSession) childTimer = setTimeout(tick, 1000);
+    if (connected && isMainSession) {
+      const elapsed = performance.now() - startedAt;
+      childTimer = setTimeout(tick, Math.max(0, childPollIntervalMs - elapsed));
+    }
   };
   tick();
 }
@@ -881,7 +1008,6 @@ async function connect(prepare = true) {
       $("welcome").hidden = true;
       setInteractive();
       startClipboardSync();
-      startChildMonitor();
       const canvas = $("screen").querySelector("canvas");
       resizeObserver = new ResizeObserver(geometry);
       resizeObserver.observe(canvas);
@@ -891,6 +1017,7 @@ async function connect(prepare = true) {
         attributeFilter: ["width", "height"],
       });
       geometry();
+      startChildMonitor();
       if ($("settings").hidden) client.focus();
     });
     client.addEventListener("disconnect", (event) => {
@@ -901,6 +1028,8 @@ async function connect(prepare = true) {
       rfb = undefined;
       resizeObserver?.disconnect();
       frameObserver?.disconnect();
+      tauriVncResizeKey = undefined;
+      document.body.classList.remove("tauri-vnc-frame");
       imeOverlay?.close();
       imeOverlay = undefined;
       $("password-dialog").close();
@@ -1044,6 +1173,32 @@ $("wheel").addEventListener("input", () => {
 $("view-only").checked = settings.viewOnly;
 $("clipboard-sync").checked = settings.clipboardSync;
 $("child-auto-open").checked = settings.autoChildOpen;
+$("system-titlebar").checked = settings.systemTitlebar;
+$("system-titlebar").addEventListener("change", async () => {
+  const enabled = $("system-titlebar").checked;
+  settings.systemTitlebar = enabled;
+  if (await applyTauriTitlebar(enabled, true)) save();
+  else {
+    settings.systemTitlebar = !enabled;
+    $("system-titlebar").checked = !enabled;
+  }
+});
+$("window-close").addEventListener("click", () => {
+  currentTauriWindow()
+    ?.close()
+    .catch(() => toast("窗口关闭失败，请重试。"));
+});
+document.querySelector(".titlebar").addEventListener("pointerdown", (event) => {
+  if (
+    !document.body.classList.contains("no-system-titlebar") ||
+    event.button !== 0 ||
+    event.target.closest("button, input, select, textarea, a")
+  )
+    return;
+  currentTauriWindow()
+    ?.startDragging?.()
+    .catch(() => {});
+});
 $("clipboard-sync").addEventListener("change", () => {
   settings.clipboardSync = $("clipboard-sync").checked;
   save();
@@ -1106,12 +1261,16 @@ $("fullscreen").addEventListener("click", async () => {
     toast("浏览器未允许全屏，请使用浏览器的全屏菜单。");
   }
 });
-document.addEventListener("fullscreenchange", () =>
+document.addEventListener("fullscreenchange", () => {
   document.body.classList.toggle(
     "immersive",
     Boolean(document.fullscreenElement),
-  ),
-);
+  );
+  if (connected) geometry();
+});
+window.addEventListener("resize", () => {
+  if (connected) geometry();
+});
 $("password-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const password = $("password").value;
