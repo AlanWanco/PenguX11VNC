@@ -22,6 +22,7 @@
       "../ime-bridge.js",
       "../public/**/*",
       "../tools/**/*",
+      "../runtime/node/**/*",
       "../node_modules/@novnc/novnc/**/*",
       "../node_modules/ws/**/*"
     ],

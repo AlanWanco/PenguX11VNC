@@ -4,6 +4,8 @@ import { ImeOverlay } from "./ime-overlay.js";
 const $ = (id) => document.getElementById(id);
 let rfb;
 let connected = false;
+let connecting = false;
+let connectEpoch = 0;
 let toastTimer;
 let frameObserver;
 let resizeObserver;
@@ -12,6 +14,11 @@ let childTimer;
 let childPollInFlight = false;
 let clipboardTimer;
 let token;
+let setupAvailable = false;
+let connectionWanted = false;
+let recoveryTimer;
+let recoveryEpoch = 0;
+let sessionReady;
 const sessionId = new URLSearchParams(location.search).get("session") || "main";
 const isMainSession = sessionId === "main";
 let localClipboardValue;
@@ -333,6 +340,16 @@ async function loadSessionInfo() {
     );
     if (!response.ok) return;
     const data = await response.json();
+    setupAvailable = data.setupAvailable === true && isMainSession;
+    $("setup-open").hidden = !setupAvailable;
+    $("setup-edit").hidden = !setupAvailable;
+    if (setupAvailable) {
+      const setupResponse = await api("/api/setup");
+      if (setupResponse.ok && !(await setupResponse.json()).configured) {
+        location.replace(`./setup.html#token=${encodeURIComponent(token)}`);
+        return;
+      }
+    }
     const title = data.session?.title || data.profile?.name || "QQ";
     document.title = `${title} · PenguX11VNC`;
     document.querySelector(".identity strong").lastElementChild.textContent =
@@ -752,20 +769,37 @@ function stopChildMonitor() {
 }
 
 function setInteractive() {
-  $("disconnect").disabled = !connected;
+  $("disconnect").disabled = !connected && !connectionWanted;
   $("send-clipboard").disabled = !connected || settings.viewOnly;
   if (rfb) rfb.viewOnly = settings.viewOnly;
 }
 
-async function connect() {
-  if (rfb) return;
+async function connect(prepare = true) {
+  await sessionReady;
+  if (rfb || connecting) return;
   if (!token) {
     toast("请使用“启动 PenguX11VNC.command”打开，获取本次本地访问凭证。");
     return;
   }
+  connecting = true;
+  const attempt = ++connectEpoch;
   $("connect").disabled = true;
   state("正在连接", "connecting");
   try {
+    if (setupAvailable && prepare) {
+      connectionWanted = true;
+      const response = await api("/api/main/prepare", { method: "POST" });
+      const main = await response.json();
+      if (attempt !== connectEpoch) return;
+      if (!response.ok)
+        throw new Error(main.detail || main.error || "远端预检失败");
+      if (main.managed) startRecoveryMonitor();
+      if (main.state !== "ready") {
+        showRecoveryState(main.state);
+        $("connect").disabled = false;
+        return;
+      }
+    }
     const response = await api(
       `/api/credentials?session=${encodeURIComponent(sessionId)}`,
     );
@@ -773,6 +807,7 @@ async function connect() {
       throw new Error("本地访问凭证已过期，请重新运行启动器。");
     let credentials = {};
     if (response.ok) credentials = await response.json();
+    if (attempt !== connectEpoch) return;
     const client = new QQRFB(
       $("screen"),
       `${location.origin.replace("http:", "ws:")}/vnc?session=${encodeURIComponent(sessionId)}&token=${encodeURIComponent(token)}`,
@@ -792,9 +827,10 @@ async function connect() {
       $("password-dialog").showModal();
       $("password").focus();
     });
-    client.addEventListener("securityfailure", () =>
-      toast("VNC 认证失败，请检查密码后重新连接。"),
-    );
+    client.addEventListener("securityfailure", () => {
+      stopMainConnection().catch(() => {});
+      toast("VNC 认证失败，已停止自动重试。请检查密码后重新连接。");
+    });
     client.addEventListener("connect", () => {
       connected = true;
       state("已连接", "connected");
@@ -823,6 +859,16 @@ async function connect() {
     });
     client.addEventListener("disconnect", (event) => {
       connected = false;
+      if (isMainSession) {
+        for (const entry of window.openedChildWindows?.values() || []) {
+          try {
+            Promise.resolve(entry.window.close()).catch(() => {});
+          } catch {
+            /* Already closed. */
+          }
+        }
+        window.openedChildWindows?.clear();
+      }
       stopClipboardSync();
       stopChildMonitor();
       rfb = undefined;
@@ -857,10 +903,77 @@ async function connect() {
     state("未连接", "disconnected");
     $("connect").disabled = false;
     toast(error.message || "无法建立连接");
+  } finally {
+    connecting = false;
   }
 }
 
-$("connect").addEventListener("click", connect);
+const recoveryLabels = {
+  "waiting-qq":
+    "远端 QQ 未运行：请在远端打开已有 QQ，程序不会替你启动第二个实例。",
+  "waiting-window":
+    "QQ 已运行，但窗口隐藏或当前图形会话不可访问。请显示 QQ 主窗口。",
+  "choose-window":
+    "发现多个候选窗口，无法安全自动选择。请打开配置向导重新选择。",
+  disconnected: "自动恢复未开启，请点击连接重试。",
+};
+function showRecoveryState(value) {
+  $("recovery-status").textContent = recoveryLabels[value] || value;
+  state("等待远端", "disconnected");
+  setInteractive();
+}
+function startRecoveryMonitor() {
+  clearTimeout(recoveryTimer);
+  const epoch = ++recoveryEpoch;
+  const tick = async () => {
+    if (!connectionWanted || epoch !== recoveryEpoch) return;
+    try {
+      const response = await api("/api/main/poll", { method: "POST" });
+      const result = await response.json();
+      if (!connectionWanted || epoch !== recoveryEpoch) return;
+      if (!response.ok)
+        throw new Error("远端暂不可达，正在等待重连；可打开配置向导检查 SSH。");
+      if (result.state === "ready") {
+        $("recovery-status").textContent = "";
+        if (!rfb) await connect(false);
+      } else {
+        rfb?.disconnect();
+        showRecoveryState(result.state);
+        if (!result.autoRecover) {
+          connectionWanted = false;
+          recoveryEpoch++;
+          setInteractive();
+        }
+      }
+    } catch (error) {
+      showRecoveryState(error.message);
+    }
+    if (connectionWanted && epoch === recoveryEpoch)
+      recoveryTimer = setTimeout(tick, 5000);
+  };
+  recoveryTimer = setTimeout(tick, 5000);
+}
+async function stopMainConnection() {
+  connectEpoch++;
+  $("connect").disabled = false;
+  connectionWanted = false;
+  recoveryEpoch++;
+  clearTimeout(recoveryTimer);
+  rfb?.disconnect();
+  if (setupAvailable) await api("/api/main/stop", { method: "POST" });
+  setInteractive();
+}
+async function openSetup() {
+  try {
+    await stopMainConnection();
+    location.href = `./setup.html#token=${encodeURIComponent(token)}`;
+  } catch {
+    toast("无法停止当前会话，请稍后重试。");
+  }
+}
+$("setup-open").addEventListener("click", openSetup);
+$("setup-edit").addEventListener("click", openSetup);
+$("connect").addEventListener("click", () => connect());
 $("bitrate").value = settings.bitrate;
 $("bitrate-value").textContent = bitrateLabels[settings.bitrate];
 $("bitrate").addEventListener("change", () => setBitrate($("bitrate").value));
@@ -869,7 +982,9 @@ $("frame-rate-value").textContent = frameRateLabels[settings.frameRate];
 $("frame-rate").addEventListener("change", () =>
   setFrameRate($("frame-rate").value),
 );
-$("disconnect").addEventListener("click", () => rfb?.disconnect());
+$("disconnect").addEventListener("click", () =>
+  stopMainConnection().catch(() => toast("会话清理失败，请检查 SSH。")),
+);
 $("fit").addEventListener("click", () => scale("fit"));
 $("actual").addEventListener("click", () => scale("actual"));
 $("wheel").value = settings.wheel;
@@ -977,6 +1092,9 @@ $("send-clipboard").addEventListener("click", () => {
 });
 $("screen").addEventListener("scroll", () => imeOverlay?.position(), true);
 window.addEventListener("pagehide", () => {
+  connectionWanted = false;
+  recoveryEpoch++;
+  clearTimeout(recoveryTimer);
   stopClipboardSync();
   stopChildMonitor();
   clearTimeout(settingsSyncTimer);
@@ -1022,5 +1140,5 @@ try {
 } catch {
   /* optional */
 }
-loadSessionInfo();
+sessionReady = loadSessionInfo();
 scale(settings.scale, false);

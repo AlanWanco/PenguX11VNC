@@ -8,8 +8,24 @@ PenguX11VNC 是本地 noVNC 窗口连接工具，复用 CachyOS 上已经运行�
 
 ```sh
 npm ci
-python3 tools/launch.py --config ~/.config/qq-window-viewer/connections.json
+npm run tauri:dev
 ```
+
+### 新设备不再需要手填 XID
+
+Tauri 会先打开界面，不再等待 SSH/VNC 就绪。缺少配置时进入软件内向导；已有配置可点击「首次连接 / 更换设备」或设置中的「配置向导与故障引导」。
+
+1. 填写 SSH 主机、用户名、端口及可选本机私钥路径。
+2. 点击**只读预检**，检查远端依赖、QQ 进程、图形会话、可见窗口和 VNC 密码文件。
+3. 单一候选自动选择；多个候选必须手动确认。程序不读取聊天标题，不按最大窗口猜测。
+4. 确认只允许 localhost 单窗口 VNC 后保存；旧配置先备份，其他配置档保留。
+5. 返回点击连接，才启动本工具独立管理的 x11vnc/SSH；输入远端准备好的 VNC 密码。
+
+软件内包含 SSH 指纹/agent、远端依赖、密码文件准备、QQ 隐藏和 Wayland 限制的引导。**并非远端零准备**：仍需同用户 Linux 图形会话、已运行的 QQ、SSH、Python 3、libX11、x11vnc 和私有 VNC 密码文件；安装和密码初始化需用户在远端确认执行。
+
+开启自动恢复后，每轮检查完成再等 5 秒。QQ 重启只恢复到同一可执行文件/类名/实例名的唯一可见普通窗口；窗口隐藏或有歧义时暂停，绝不回退全桌面。主动断开会取消恢复并清理本次自建 VNC，不影响 QQ、输入法或已有 VNC/共享隧道。
+
+现有手动配置仍可沿用原来的 VNC；要启用主窗口自动发现、托管和恢复，需完成向导授权。Chrome/Python 回退入口仍使用手工配置，不具备此向导。
 
 完整路线图：**[TODO.md](TODO.md)**；Tauri 迁移方案：**[TAURI-MIGRATION.md](TAURI-MIGRATION.md)**。
 
@@ -18,6 +34,8 @@ python3 tools/launch.py --config ~/.config/qq-window-viewer/connections.json
 在 Finder 双击 **`启动 PenguX11VNC.command`**，然后点击「连接窗口」。旧的 `启动 QQ 窗口.command` 仍保留兼容。
 
 Tauri 2 版本可运行。应用图标套件位于 `src-tauri/icons/`，包含 macOS `.icns`、Windows `.ico` 和多尺寸 PNG。
+
+GitHub Actions 的 `Build debug bundles` 会为每次 push/PR 生成 5 个可下载产物：macOS arm64 `.dmg`、Linux amd64/arm64 `.AppImage`、Windows amd64/arm64 NSIS 安装包。每个平台每次只上传一个文件，保留 14 天；产物内置对应架构 Node.js，不需要另装 Node.js。它们未签名，仅用于调试。
 
 ```sh
 npm run tauri:dev
@@ -51,12 +69,12 @@ ssh-add ~/.config/qq-window-viewer/keys/id_remote  # 加密私钥可选
 
 ### 环境要求
 
-- Tauri 入口：Rust/Cargo、Node.js 22+、系统 `ssh`；不需要 Chrome/Python。
+- 源码开发的 Tauri 入口：Rust/Cargo、Node.js 22+、系统 `ssh`；不需要 Chrome/Python。GitHub Actions 下载的安装包已内置对应架构 Node.js，但仍需要系统 `ssh` 和远端依赖。
 - 旧 Chrome 回退入口：Node.js 22+、Python 3、Google Chrome。
-- `npm ci` 安装锁定依赖（noVNC 1.7.0、ws 8.21.3）；项目无打包步骤。
-- SSH 连接目标由 `connections.json` 配置；远端需要已有监听在 localhost:5900 的 x11vnc。
-- 启动器优先复用 `127.0.0.1:15900` SSH 隧道；若不存在，仅尝试创建隧道，不启动/重启远端服务。
-- 若 `/tmp/qq-vnc.pass` 存在且当前用户拥有、权限 600，则由内存解码使用；否则弹出密码框。没有硬编码密码，不把密码存入浏览器。
+- `npm ci` 安装锁定依赖（noVNC 1.7.0、ws 8.21.3）；`npm run tauri:build` 可构建单一指定格式，GitHub Actions 负责跨平台调试打包。
+- SSH 连接目标由本机配置指定；手动模式要求已有 localhost VNC，向导托管模式在连接时为选定窗口启动独立 localhost VNC。
+- 手动模式/旧启动器优先复用既有 SSH 隧道。向导模式使用独立随机本机端口，不接管已有服务；远端服务只在授权后连接时创建。
+- 手工配置可指定本机 VNC 密码文件，要求当前用户拥有、权限 600。向导模式弹窗输入密码，不保存到浏览器或配置文件。
 - VNC 密码文件是**可逆混淆**，不是安全加密；不要公开。旧临时密码应另行更换。
 
 ## 候选框补采集（实验性）
@@ -77,7 +95,7 @@ Fcitx popup → capture-ime → SSH stdout → 本机认证 WS → 等比例 PNG
 - 前端按 QQ framebuffer 的相同比例、相对位置叠加。失连或停止收到心跳时隐藏。
 - **真实可见候选框尚待人工确认**；已验证 helper 编译、隐藏状态、通道握手，以及模拟候选框在三种尺寸中的位置。
 - 当前 helper 只支持 X11/Xwayland popup。若 Fcitx 使用原生 Wayland popup、QQ 失焦、候选框超出可显示区域或开新窗口，可能仍不可见/被裁切。不是通用多窗口桌面共享。
-- Tauri 入口的 Rust manager 从连接档读取 `DISPLAY`、XAUTHORITY、SSH 主机和 QQ XID；旧 Chrome 回退入口由 `ime-bridge.js` 读取同一配置。注销或 QQ 完全重启后仍需重新检查配置。
+- Tauri 入口的 Rust manager 从连接档读取 `DISPLAY`、XAUTHORITY、SSH 主机和 QQ XID；旧 Chrome 回退入口由 `ime-bridge.js` 读取同一配置。手动模式下注销或 QQ 完全重启后仍需重新检查配置；向导模式会重新发现会话，歧义时停止并提示。
 
 本次远端 x11vnc 原有 `-xwarppointer` 保持不变，用于避免 Xwayland 的 XTEST 坐标偏移。
 
@@ -88,7 +106,7 @@ Fcitx popup → capture-ime → SSH stdout → 本机认证 WS → 等比例 PNG
 - token 从 URL fragment 导入后移除，只保留在当前会话；不是 VNC 密码。
 - 密码 API 需要 token，无 CORS；静态服务器只开放 `public/` 和 noVNC JS，不开放源码、配置、runtime 或密码文件。
 - 本地连接未使用 TLS；Linux↔Mac 传输由既有 SSH 隧道加密。不要把本机服务反代到公网。
-- `.runtime/` 为 700，会话记录及日志为 600，包含私有访问链接；不要上传它们。
+- Tauri 的应用数据目录保存会话记录和日志（会话文件/日志在 Unix 上为 600）；旧 Chrome 回退入口的 `.runtime/` 为 700。它们包含私有访问链接，均不要上传。
 - npm 自带 noVNC 源码可供本地修改，当前通过 `public/qq-rfb.js` 小型适配层扩展，不改 `node_modules`。仓库只包含脱敏源码，运行配置不纳入版本控制。
 
 ## 开发与验证
@@ -97,10 +115,12 @@ Fcitx popup → capture-ime → SSH stdout → 本机认证 WS → 等比例 PNG
 npm test
 npm run test:browser       # 使用已安装的 Chrome，始终 headless
 python3 tools/launch.py --no-open
-node test/live-readonly.mjs  # 真实连接，只读；不截图、不读取剪贴板、不发送输入
+node test/onboarding-browser.mjs  # 隔离的向导/恢复浏览器测试，不访问远端
+python3 -m unittest discover -s test -p 'test_remote_session.py'
+cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
-已覆盖：服务边界/路径访问/认证、VNC 密码文件格式、配置档校验、无损编码协商、帧率请求控制、三种窗口比例、点击坐标、候选框叠层位置、F11/方括号、25% vs 100% 的协议滚轮步数、收起状态栏/悬浮球拖动、只读模式、断开重连及 Unicode 降级保护。真实连接确认收到非黑图像 `1669×1147`。
+已覆盖：服务边界/路径访问/认证、VNC 密码文件格式、配置档校验、无损编码协商、帧率请求控制、三种窗口比例、点击坐标、候选框叠层位置、F11/方括号、25% vs 100% 的协议滚轮步数、收起状态栏/悬浮球拖动、只读模式、断开重连及 Unicode 降级保护、首次连接向导的预检/歧义选择/授权门、恢复与主动停止。真实连接确认收到非黑图像 `1669×1147`。
 
 滚轮算法按事件累积：像素/行/页统一单位，反向和长空闲清掉余量；单次最多 2 步，输出间隔至少 32ms，无定时队列补滚。25% 是归一化输入的增益，不保证每种鼠标/驱动的主观速度恰好为 TurboVNC 的四分之一。
 
@@ -112,7 +132,7 @@ Tauri 主窗口关闭会停止本次 Node 代理、IME SSH 和 Rust 子窗口；
 
 重新打开 TurboVNC 即可使用原来的连接。要恢复其正常等比例参数，应使用 `Scale=FixedRatio`，不是 `Auto`。
 
-远端 helper 不是常驻系统服务，仅在本前端连接时启动。不连接本前端即不运行，无需回退任何输入法/桌面配置。
+远端 helper/托管 VNC 不是常驻系统服务。本工具不会更改输入法/桌面配置。真实 QQ 重启后的恢复及多设备组合仍需现场验证；当前自动化测试使用模拟服务，已做现有 Linux 环境的只读预检验证。
 
 ## 许可
 

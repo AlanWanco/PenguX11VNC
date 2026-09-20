@@ -1,6 +1,6 @@
 mod manager;
 
-use manager::{load_profile, start_main_tunnel, ManagerRuntime, Profile};
+use manager::{startup_profile, ManagerRuntime, Profile};
 use serde_json::json;
 use std::fs::{self, OpenOptions};
 use std::io;
@@ -17,7 +17,6 @@ use url::Url;
 
 struct RuntimeState {
     manager: Mutex<Option<ManagerRuntime>>,
-    main_tunnel: Mutex<Option<Child>>,
     node: Mutex<Option<Child>>,
     stopped: AtomicBool,
 }
@@ -34,9 +33,6 @@ impl RuntimeState {
             if let Some(mut manager) = manager.take() {
                 manager.stop();
             }
-        }
-        if let Ok(mut tunnel) = self.main_tunnel.lock() {
-            kill_child(tunnel.take());
         }
     }
 }
@@ -64,6 +60,8 @@ fn bridge_root(app: &AppHandle) -> io::Result<PathBuf> {
 
     let mut candidates = vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..")];
     if let Ok(resource_dir) = app.path().resource_dir() {
+        // Tauri places ../relative resources under _up_ in bundled apps.
+        candidates.push(resource_dir.join("_up_"));
         candidates.push(resource_dir.join("bridge"));
         candidates.push(resource_dir);
     }
@@ -82,9 +80,8 @@ fn is_bridge_root(path: &Path) -> bool {
     path.join("server.js").is_file() && path.join("public").is_dir()
 }
 
-fn write_session(root: &Path, url: &Url, pid: u32, profile: &Profile) -> io::Result<()> {
-    let runtime = root.join(".runtime");
-    fs::create_dir_all(&runtime)?;
+fn write_session(runtime: &Path, url: &Url, pid: u32, profile: &Profile) -> io::Result<()> {
+    fs::create_dir_all(runtime)?;
     let path = runtime.join("session.json");
     fs::write(
         &path,
@@ -106,13 +103,35 @@ fn write_session(root: &Path, url: &Url, pid: u32, profile: &Profile) -> io::Res
     Ok(())
 }
 
+fn bundled_node(root: &Path) -> PathBuf {
+    if let Ok(path) = std::env::var("PENGUX11VNC_NODE") {
+        return PathBuf::from(path);
+    }
+    let names = if cfg!(windows) {
+        ["pengu-node.exe", "node.exe"]
+    } else {
+        ["pengu-node", "node"]
+    };
+    let candidates = names.iter().flat_map(|name| {
+        [
+            root.join("node").join(name),
+            root.join("runtime/node").join(name),
+            root.join(name),
+        ]
+    });
+    candidates
+        .into_iter()
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| PathBuf::from(if cfg!(windows) { "node.exe" } else { "node" }))
+}
+
 fn start_node(
     root: &Path,
+    runtime: &Path,
     profile: &Profile,
     manager: &ManagerRuntime,
 ) -> io::Result<(Child, Url)> {
-    let runtime = root.join(".runtime");
-    fs::create_dir_all(&runtime)?;
+    fs::create_dir_all(runtime)?;
     let log_path = runtime.join("tauri-server.log");
     let log = OpenOptions::new()
         .create(true)
@@ -125,8 +144,7 @@ fn start_node(
         fs::set_permissions(&log_path, fs::Permissions::from_mode(0o600))?;
     }
 
-    let mut command =
-        Command::new(std::env::var("PENGUX11VNC_NODE").unwrap_or_else(|_| "node".to_string()));
+    let mut command = Command::new(bundled_node(root));
     command
         .arg(root.join("server.js"))
         .current_dir(root)
@@ -175,39 +193,45 @@ pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             let root = bridge_root(app.handle())?;
-            let profile = load_profile()?;
-            let main_tunnel = start_main_tunnel(&profile)?;
-            let manager = match ManagerRuntime::start(profile.clone()) {
-                Ok(manager) => manager,
-                Err(error) => {
-                    kill_child(main_tunnel);
-                    return Err(error.into());
-                }
-            };
-            let (node, url) = match start_node(&root, &profile, &manager) {
+            let (profile, configured, startup_error) = startup_profile();
+            let manager = ManagerRuntime::start(profile.clone(), configured, startup_error)?;
+            let runtime = app
+                .path()
+                .app_data_dir()
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            let (node, url) = match start_node(&root, &runtime, &profile, &manager) {
                 Ok(result) => result,
                 Err(error) => {
                     let mut manager = manager;
                     manager.stop();
-                    kill_child(main_tunnel);
                     return Err(error.into());
                 }
             };
 
-            write_session(&root, &url, node.id(), &profile)?;
+            if let Err(error) = write_session(&runtime, &url, node.id(), &profile) {
+                kill_child(Some(node));
+                let mut manager = manager;
+                manager.stop();
+                return Err(error.into());
+            }
             app.manage(RuntimeState {
                 manager: Mutex::new(Some(manager)),
-                main_tunnel: Mutex::new(main_tunnel),
                 node: Mutex::new(Some(node)),
                 stopped: AtomicBool::new(false),
             });
-            WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
+            if let Err(error) = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
                 .title("PenguX11VNC")
                 .inner_size(1280.0, 900.0)
                 .min_inner_size(640.0, 480.0)
                 .resizable(true)
                 .visible(true)
-                .build()?;
+                .build()
+            {
+                if let Some(state) = app.try_state::<RuntimeState>() {
+                    state.stop();
+                }
+                return Err(error.into());
+            }
             Ok(())
         })
         .on_window_event(|window, event| {

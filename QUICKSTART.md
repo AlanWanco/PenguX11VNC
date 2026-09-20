@@ -1,4 +1,4 @@
-# PenguX11VNC：5 分钟配置
+# PenguX11VNC：首次连接与远端准备
 
 目标：在另一台设备打开 **Linux 上已经运行的 QQ 窗口**。不会启动第二个 QQ。
 
@@ -6,28 +6,45 @@
 
 ### macOS
 
+下载 GitHub Actions 的调试 `.dmg` 后直接安装即可；安装包已内置对应架构 Node.js。源码开发时执行：
+
 ```sh
 cd qq-viewer
 npm ci
 ```
 
-Tauri 入口需要：Node.js 22+、Rust/Cargo、能执行 `ssh` 的终端。Python 3 和 Chrome 仅是旧回退启动器的依赖。
+源码 Tauri 入口需要：Node.js 22+、Rust/Cargo、能执行 `ssh` 的终端。Python 3 和 Chrome 仅是旧回退启动器的依赖；系统仍需 OpenSSH。
 
 ### Linux / Windows
 
-当前网页前端可以运行在 Chromium/Chrome 中；Tauri 2 版本也已可运行。Rust 管理 SSH/VNC/子窗口生命周期，Node 暂时只提供本地 HTTP/WebSocket bridge。
+优先下载对应 GitHub Actions 调试产物：Linux 为 `.AppImage`，Windows 为 NSIS 安装包；amd64/arm64 分开构建，安装包已内置对应架构 Node.js。系统仍需 OpenSSH，远端依赖按下方说明准备。
 
-## 2. 远端准备
+源码主要在 macOS 验证 Tauri 与 Chrome 回退入口。Linux / Windows 仍需平台编译依赖、路径及 SSH agent 回归；不要将现有源码视为这些平台已经验证的安装包。Rust 管理 SSH/VNC/子窗口生命周期，Node 暂时提供本地 HTTP/WebSocket bridge。
+
+## 2. 推荐：软件内连接向导（Tauri）
+
+运行 `npm run tauri:dev`，没有配置时自动打开向导。已有配置点击首页「首次连接 / 更换设备」或设置中的「配置向导与故障引导」。
+
+- 填写 SSH 信息后点击「运行只读预检」，不再要求手工填写 DISPLAY、XAUTHORITY 或主窗口 XID。
+- 只有一个合法的主窗口候选时自动选中；多个候选必须选择。无可见窗口会提供原因和处理提示。
+- 根据内置引导处理缺少依赖、主机指纹、密钥 agent 或密码文件问题，然后重新预检。
+- 勾选 localhost 单窗口 VNC 授权、按需开启自动恢复，保存后返回首页点击连接。
+- 保存只写本机配置（权限 600）并先备份旧文件；不会自动安装包、启动或登录 QQ。
+- 主动断开停止自动恢复并回收本次自建服务。现有 VNC 和共享 SSH 隧道不会被停止。
+
+远端仍需准备一次。下面手工配置章节供旧 Chrome/Python 入口及高级用户使用；Tauri 向导用户不需要复制示例 JSON。
+
+## 3. 远端准备
 
 Linux 上必须已经有：
 
 - QQ 登录并显示在本地屏幕；
-- `x11vnc` 只监听 `127.0.0.1:5900`；
+- Python 3、libX11 和 `x11vnc` 已安装；向导模式会启动仅 localhost 的独立 VNC，手工模式需自行准备 VNC；
 - SSH 服务；
 - VNC 密码文件；
 - 本工具的两个可选 helper：`capture-ime`、`list-qq-windows`。
 
-远端窗口信息先查出来：
+手工模式才需要查询窗口信息（SSH shell 的空环境不能代表 QQ 会话）：
 
 ```sh
 echo "$DISPLAY"
@@ -37,7 +54,7 @@ xprop -root _NET_CLIENT_LIST_STACKING
 
 不要把 VNC 端口直接暴露到局域网或公网。
 
-## 3. SSH 登录
+## 4. SSH 登录
 
 先确认无交互登录成功：
 
@@ -51,7 +68,7 @@ ssh -o BatchMode=yes user@linux-host true
 python3 tools/import-key.py ~/.ssh/id_ed25519
 ```
 
-把脚本输出的路径写入配置档的 `ssh.privateKeyFile`。加密私钥先加入 agent：
+把脚本输出的路径写入配置档或向导中的私钥路径。加密私钥先加入 agent：
 
 ```sh
 ssh-add ~/.config/qq-window-viewer/keys/id_remote
@@ -59,7 +76,7 @@ ssh-add ~/.config/qq-window-viewer/keys/id_remote
 
 Windows 使用 OpenSSH 的 `ssh-agent`；Linux/macOS 使用系统 `ssh-agent` 或钥匙串。工具不保存私钥口令。
 
-## 4. 创建连接配置
+## 5. 手工创建连接配置（可选）
 
 ```sh
 mkdir -p ~/.config/qq-window-viewer
@@ -88,7 +105,7 @@ chmod 600 ~/.config/qq-window-viewer/connections.json
 
 密码文件权限必须是 `600`。JSON 不支持注释；需要说明时另写文档，不要把密码写进 JSON。
 
-## 5. 启动
+## 6. 启动
 
 macOS 双击：
 
@@ -124,7 +141,7 @@ python3 tools/launch.py --no-open
 4. 需要时开启双向剪贴板同步；
 5. 「收起」隐藏四周 UI，但保留底部状态栏；鼠标移到顶部边缘可暂时展开，悬浮球可拖动并恢复。
 
-## 6. 常见问题
+## 7. 常见问题
 
 ### 黑屏或无法连接
 
@@ -153,16 +170,16 @@ nc -vz 127.0.0.1 15900
 
 配置 `children.enabled=true` 后，前端递归检查 X11 窗口树，只接受可见、同属 QQ 类名且达到最小尺寸的窗口；`QQ`/`Qq` 类名均兼容。每个子窗口单独启动 localhost VNC 和 SSH 转发，并打开新的前端窗口，子窗口页面会自动连接。Linux 子窗口关闭后，前端会自动关闭对应浏览器窗口并清理会话。未映射的隐藏窗口不会捕获；没有匹配窗口时不会启动额外服务。
 
-## 7. 安全边界
+## 8. 安全边界
 
 - 本地 Web/WS 只监听 `127.0.0.1`；
 - VNC 只通过 SSH 转发；
 - 本机密码文件只读进程内存，不保存到浏览器；
 - 默认不读写剪贴板；
 - 不上传私钥、不上传配置、不经过云端；
-- `.runtime/` 是私有运行数据，不要提交或分享。
+- Tauri 应用数据目录和旧回退入口的 `.runtime/` 都是私有运行数据，不要提交或分享。
 
-## 8. 开源与跨平台状态
+## 9. 开源与跨平台状态
 
 当前可复用部分：noVNC core（MPL-2.0）、本地 Web/WS bridge、JSON 配置、滚轮限速和窗口会话逻辑。
 

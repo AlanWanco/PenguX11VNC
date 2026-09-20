@@ -2,7 +2,7 @@
 
 ## 结论
 
-现在适合开始迁移。noVNC 前端、JSON 配置、子窗口会话协议和安全边界已经稳定；当前 macOS 版本的主要限制是依赖 Node.js、Python、Chrome 和外部 SSH 命令。Tauri 2 可以把这些生命周期收进桌面应用，但不需要重写画面协议。
+现在适合开始迁移。noVNC 前端、JSON 配置、子窗口会话协议和安全边界已经稳定；源码开发仍依赖 Node.js，旧回退入口依赖 Python/Chrome，所有桌面入口依赖外部 SSH 命令。CI 调试安装包已内置匹配架构的 Node.js，但仍保留本地 bridge。Tauri 2 可以把这些生命周期收进桌面应用，但不需要重写画面协议。
 
 原则：**先保留 `public/`，先替换启动器，再替换本地 bridge。** 不直接大规模重写。
 
@@ -72,11 +72,11 @@ Tauri WebView
 
 ### 阶段 4：打包与测试
 
-- macOS `.app` / `.dmg`；
-- Windows `.msi`；
-- Linux AppImage / deb / rpm；
-- 签名、更新和回滚；
-- 测试主窗口、多个子窗口、远端窗口消失、网络断线、浏览器窗口关闭、剪贴板关闭状态和只读状态。
+- [x] GitHub Actions 未签名调试包：macOS arm64 `.dmg`；
+- [x] GitHub Actions 未签名调试包：Linux amd64/arm64 `.AppImage`；
+- [x] GitHub Actions 未签名调试包：Windows amd64/arm64 NSIS 安装包；
+- [ ] 签名、更新和回滚；
+- [ ] 测试主窗口、多个子窗口、远端窗口消失、网络断线、浏览器窗口关闭、剪贴板关闭状态和只读状态。
 
 ## IPC 设计
 
@@ -113,4 +113,4 @@ Rust 通过事件通知：
 
 1. 在真实 QQ 子窗口现场确认 Tauri 原生窗口自动连接和关闭回收；
 2. 接入原生密钥选择器与 Keychain/系统凭据存储；
-3. 再移除 Node WebSocket bridge，并完成 `.app`、`.msi`、AppImage/deb/rpm 打包。
+3. 再移除 Node WebSocket bridge，并完成签名 Release 包、更新和回滚。

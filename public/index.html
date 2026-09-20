@@ -15,7 +15,7 @@
         <img src="./icon.svg" alt="" />
         <div>
           <strong>PenguX11VNC <span>· QQ 窗口连接</span></strong
-          ><small>CachyOS · 本地窗口</small>
+          ><small>Linux · 单窗口远程连接</small>
         </div>
       </div>
       <div class="connection">
@@ -70,6 +70,10 @@
           连接窗口 <span aria-hidden="true">↗</span>
         </button>
         <small id="welcome-hint">仅通过本机 SSH 隧道连接</small>
+        <button id="setup-open" class="secondary" hidden>
+          首次连接 / 更换设备
+        </button>
+        <p id="recovery-status" class="help" role="status"></p>
       </section>
       <aside id="settings" hidden aria-label="连接设置">
         <div class="panel-heading">
@@ -177,6 +181,9 @@
         </section>
         <section class="setting-section">
           <h3>连接档</h3>
+          <button id="setup-edit" class="secondary" hidden>
+            配置向导与故障引导
+          </button>
           <div id="profile-name" class="detail-row">
             <span>配置</span><b>读取中</b>
           </div>

@@ -1,5 +1,10 @@
 node_modules/
 .runtime/
+runtime/*
+!runtime/node/
+runtime/node/*
+!runtime/node/.gitkeep
+dist/
 connections.json
 *.local.json
 *.pass

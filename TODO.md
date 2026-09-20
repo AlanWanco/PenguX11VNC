@@ -12,8 +12,13 @@
 - [x] 可见 QQ 子窗口递归发现与独立会话
 - [x] 子窗口关闭状态实时回收与恢复
 - [ ] 子窗口真实弹窗场景回归测试（已验证 X11 helper 和独立 VNC；仍需用户现场确认自动弹窗流程）
-- [ ] 配置界面编辑/校验/导入导出
-- [ ] SSH 隧道断线自动重连和状态提示
+- [x] Tauri 首次连接向导与软件内 SSH/依赖/密码文件/窗口状态引导
+- [x] 只读预检、自动发现会话与 QQ 主窗口，多候选时人工选择
+- [x] 授权后的独立 localhost 主窗口 VNC、断开/退出回收
+- [x] 主窗口重启恢复状态机（唯一同身份候选才恢复；隐藏/歧义暂停）
+- [ ] 真实 QQ 重启、注销、多显示会话及网络断开后的现场恢复回归
+- [ ] 多 profile 切换/导入导出与原生密钥文件选择器
+- [x] 向导托管主会话的 SSH/VNC 断线重连和等待提示（手动模式不自动接管）
 
 ## v0.3：Tauri 桌面版
 
@@ -29,9 +34,9 @@
 - [x] 原生多窗口：Tauri 页面使用 WebviewWindow 创建 QQ 子窗口；Chrome 回退仍使用 window.open()
 - [x] WebView 承载 noVNC 画布；复用现有 `public/qq-rfb.js` 和 UI
 
-- [ ] macOS `.app`、Windows `.msi`、Linux AppImage/deb/rpm 打包
-- [ ] 自动更新签名与版本回滚
-- [ ] 不依赖用户安装 Node.js（Tauri 当前仍使用 Node HTTP/WebSocket 过渡 bridge；Chrome/Python 仅属于回退入口）
+- [x] GitHub Actions 未签名调试打包：macOS arm64 DMG、Linux amd64/arm64 AppImage、Windows amd64/arm64 NSIS 安装包
+- [ ] Release 签名、自动更新与版本回滚
+- [x] 调试安装包内置对应目标架构 Node.js（Tauri 仍使用 Node HTTP/WebSocket 过渡 bridge；源码开发仍需 Node.js）
 - [ ] Windows/Linux 的 SSH agent、路径和权限适配
 - [ ] Windows/Linux 剪贴板权限与 Unicode 回归测试
 

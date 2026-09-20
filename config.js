@@ -96,7 +96,7 @@ export function normalizeConnection(raw = {}, id = "connection") {
     throw new Error(`Invalid SSH user: ${user}`);
   const sshHost = host(ssh.host, legacyConnection.ssh.host);
   const keyFile = ssh.privateKeyFile ? expand(ssh.privateKeyFile) : "";
-  if (keyFile && (!keyFile.startsWith("/") || keyFile.includes("\0")))
+  if (keyFile && (!path.isAbsolute(keyFile) || keyFile.includes("\0")))
     throw new Error("Invalid private key path");
   const remoteHost = host(tunnel.remoteHost, "127.0.0.1");
   const remotePasswordFile = safeRemotePath(

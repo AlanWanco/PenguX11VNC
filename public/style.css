@@ -624,3 +624,82 @@ body.ui-collapsed #ime-overlay {
     transition: none !important;
   }
 }
+
+/* First-run guidance must remain scrollable even without a remote session. */
+body.setup-page {
+  display: block;
+  height: auto;
+  min-height: 100vh;
+  overflow: auto;
+  padding: 24px;
+}
+.setup-card {
+  max-width: 880px;
+  margin: auto;
+  line-height: 1.7;
+}
+.setup-card header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.setup-card fieldset,
+.setup-card section,
+.setup-card details {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 18px;
+  margin: 16px 0;
+}
+.setup-card label {
+  display: block;
+  margin: 12px 0;
+}
+.setup-card input:not([type="checkbox"]),
+.setup-card select {
+  display: block;
+  width: 100%;
+  padding: 10px;
+  margin-top: 6px;
+  color: var(--text);
+  background: #211e29;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.setup-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.setup-card .setup-checkbox {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+.setup-card code,
+.setup-card pre {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  color: var(--accent);
+}
+.setup-card summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+#setup-status {
+  border-left: 3px solid var(--accent);
+  padding: 10px 16px;
+  background: #211e29;
+}
+#recovery-status {
+  max-width: 540px;
+  text-align: center;
+}
+@media (max-width: 640px) {
+  .setup-grid {
+    grid-template-columns: 1fr;
+  }
+  body.setup-page {
+    padding: 12px;
+  }
+}

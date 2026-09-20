@@ -282,7 +282,11 @@ function allocatePort() {
 async function readVncPassword(passwordFile) {
   if (!passwordFile) return undefined;
   const info = await stat(passwordFile);
-  if (info.uid !== process.getuid() || info.mode & 0o077 || !info.isFile())
+  if (!info.isFile()) throw new Error("Password file must be a regular file");
+  if (
+    typeof process.getuid === "function" &&
+    (info.uid !== process.getuid() || info.mode & 0o077)
+  )
     throw new Error("Password file must be owned by you and chmod 600");
   return decodePassword(await readFile(passwordFile));
 }
@@ -304,7 +308,7 @@ export async function startServer({
   settingsPath = process.env.QQ_VIEWER_SETTINGS_PATH ||
     defaultViewerSettingsPath,
 } = {}) {
-  const profile = normalizeConnection(
+  let profile = normalizeConnection(
     connection || { vnc: { passwordFile: "" }, children: { enabled: false } },
     connection?.id || "runtime",
   );
@@ -549,6 +553,70 @@ export async function startServer({
       const sessionId = url.searchParams.get("session") || "main";
       if (url.pathname.startsWith("/api/") && !authorized(req, url))
         return reply(res, 403, "Forbidden");
+      if (url.pathname === "/api/setup" && req.method === "GET") {
+        if (sessionId !== "main") return json(res, 403, { error: "main-only" });
+        return json(
+          res,
+          200,
+          rustManager
+            ? await managerRequest(rustManager, "/setup")
+            : { available: false, configured: true },
+        );
+      }
+      if (
+        [
+          "/api/setup/preflight",
+          "/api/setup/save",
+          "/api/main/prepare",
+          "/api/main/poll",
+          "/api/main/stop",
+        ].includes(url.pathname)
+      ) {
+        if (sessionId !== "main") return json(res, 403, { error: "main-only" });
+        if (req.method !== "POST")
+          return json(res, 405, { error: "method-not-allowed" });
+        if (!rustManager) return json(res, 404, { error: "requires-tauri" });
+        if (
+          url.pathname.startsWith("/api/setup/") &&
+          [...wss.clients].some((ws) => ws.viewerSession)
+        )
+          return json(res, 409, { error: "请先断开连接，再修改连接配置" });
+        const body = await requestBody(req, 32 * 1024);
+        const data = await managerRequest(rustManager, url.pathname.slice(4), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (data.profile) {
+          profile = normalizeConnection(data.profile, data.profile.id);
+          passwordFile = undefined;
+        }
+        const main = getSession("main");
+        if (data.state === "ready") {
+          const changed =
+            main.targetPort !== data.targetPort ||
+            main.windowId !== profile.window.id;
+          if (changed) {
+            for (const ws of wss.clients)
+              ws.close(1000, "Window session changed");
+            for (const id of childProcesses.keys()) sessions.delete(id);
+            childProcesses.clear();
+          }
+          Object.assign(main, {
+            targetPort: data.targetPort,
+            windowId: profile.window.id,
+            title: profile.name,
+          });
+        } else if (data.state || url.pathname === "/api/main/stop") {
+          for (const ws of wss.clients)
+            ws.close(1000, "Window session stopped");
+          for (const id of childProcesses.keys()) sessions.delete(id);
+          childProcesses.clear();
+        }
+        // Only the setup endpoint returns the editable private profile.
+        if (!url.pathname.startsWith("/api/setup/")) delete data.profile;
+        return json(res, 200, data);
+      }
       if (url.pathname === "/api/status") {
         const session = getSession(sessionId);
         return session
@@ -576,6 +644,7 @@ export async function startServer({
         return session
           ? json(res, 200, {
               session: publicSession(session),
+              setupAvailable: Boolean(rustManager),
               profile: {
                 id: profile.id,
                 name: profile.name,
@@ -721,6 +790,7 @@ export async function startServer({
       return;
     }
     wss.handleUpgrade(req, socket, head, (ws) => {
+      ws.viewerSession = session.id;
       session.lastSeen = Date.now();
       const upstream = net.createConnection({
         host: "127.0.0.1",

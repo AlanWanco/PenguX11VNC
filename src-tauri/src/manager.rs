@@ -1,3 +1,7 @@
+#[path = "onboarding.rs"]
+mod onboarding;
+use onboarding::Onboarding;
+
 use rand::random;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -60,11 +64,11 @@ impl Profile {
             .get("ssh", "privateKeyFile")
             .and_then(Value::as_str)
             .unwrap_or("");
-        if value.is_empty() {
+        if value.starts_with('-') || value.is_empty() {
             return Ok(None);
         }
         let expanded = expand_home(value);
-        if !expanded.starts_with('/') || expanded.contains('\0') {
+        if !PathBuf::from(&expanded).is_absolute() || expanded.contains('\0') {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "SSH 私钥路径必须是本机绝对路径",
@@ -143,7 +147,7 @@ impl Profile {
             .get("vnc", "passwordFile")
             .and_then(Value::as_str)
             .unwrap_or("");
-        if value.is_empty() {
+        if value.starts_with('-') || value.is_empty() {
             None
         } else {
             Some(expand_home(value))
@@ -209,13 +213,15 @@ struct ChildSession {
 struct ManagerState {
     profile: Profile,
     children: HashMap<String, ChildSession>,
+    onboarding: Onboarding,
 }
 
 impl ManagerState {
-    fn new(profile: Profile) -> Self {
+    fn new(profile: Profile, configured: bool, startup_error: Option<String>) -> Self {
         Self {
             profile,
             children: HashMap::new(),
+            onboarding: Onboarding::new(configured, startup_error),
         }
     }
 
@@ -330,6 +336,7 @@ impl ManagerState {
     }
 
     fn cleanup_all(&mut self) {
+        self.onboarding.stop();
         let ids: Vec<String> = self.children.keys().cloned().collect();
         for id in ids {
             self.cleanup(&id);
@@ -346,12 +353,20 @@ pub struct ManagerRuntime {
 }
 
 impl ManagerRuntime {
-    pub fn start(profile: Profile) -> io::Result<Self> {
+    pub fn start(
+        profile: Profile,
+        configured: bool,
+        startup_error: Option<String>,
+    ) -> io::Result<Self> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
         listener.set_nonblocking(true)?;
         let address = listener.local_addr()?;
         let token = random_token();
-        let state = Arc::new(Mutex::new(ManagerState::new(profile)));
+        let state = Arc::new(Mutex::new(ManagerState::new(
+            profile,
+            configured,
+            startup_error,
+        )));
         let shutdown = Arc::new(AtomicBool::new(false));
         let thread_state = Arc::clone(&state);
         let thread_shutdown = Arc::clone(&shutdown);
@@ -403,16 +418,10 @@ pub fn load_profile() -> io::Result<Profile> {
         .unwrap_or_else(|_| home_path(DEFAULT_CONFIG));
     let selected = std::env::var("QQ_VIEWER_PROFILE").ok();
     if !config_path.exists() {
-        if selected.is_some() || config_path != home_path(DEFAULT_CONFIG) {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("找不到配置文件：{}", config_path.display()),
-            ));
-        }
-        return Ok(Profile {
-            id: "linux-qq".to_string(),
-            raw: legacy_profile(),
-        });
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "尚未创建连接配置，请使用向导",
+        ));
     }
     let document: Value = serde_json::from_str(&fs::read_to_string(&config_path)?)?;
     let connections = document
@@ -459,6 +468,9 @@ pub fn start_main_tunnel(profile: &Profile) -> io::Result<Option<Child>> {
 }
 
 fn discover_windows(profile: &Profile) -> io::Result<Vec<WindowInfo>> {
+    if profile.raw["managed"]["enabled"] == true {
+        return onboarding::fallback_windows(profile);
+    }
     let command = format!(
         "env DISPLAY={} XAUTHORITY={} {} {} {}",
         shell_quote(&profile.display()),
@@ -540,6 +552,8 @@ fn ssh_args(
         "-o".to_string(),
         "BatchMode=yes".to_string(),
         "-o".to_string(),
+        "StrictHostKeyChecking=yes".to_string(),
+        "-o".to_string(),
         "ConnectTimeout=8".to_string(),
         "-o".to_string(),
         "ServerAliveInterval=15".to_string(),
@@ -579,17 +593,33 @@ fn run_ssh(profile: &Profile, command: &str, timeout: Duration) -> io::Result<St
         .stderr(Stdio::piped())
         .stdin(Stdio::null())
         .spawn()?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("SSH stdout unavailable"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| io::Error::other("SSH stderr unavailable"))?;
+    let out = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stdout.take(256 * 1024).read_to_end(&mut bytes);
+        bytes
+    });
+    let err = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stderr.take(64 * 1024).read_to_end(&mut bytes);
+        bytes
+    });
     let deadline = Instant::now() + timeout;
     loop {
-        if child.try_wait()?.is_some() {
-            let output = child.wait_with_output()?;
-            if output.status.success() {
-                return Ok(String::from_utf8_lossy(&output.stdout).to_string());
+        if let Some(status) = child.try_wait()? {
+            let output = out.join().unwrap_or_default();
+            let diagnostic = err.join().unwrap_or_default();
+            if status.success() {
+                return Ok(String::from_utf8_lossy(&output).to_string());
             }
-            return Err(io::Error::other(format!(
-                "SSH 远端命令失败：{}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            )));
+            return Err(io::Error::other(ssh_failure_hint(&diagnostic)));
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
@@ -597,6 +627,28 @@ fn run_ssh(profile: &Profile, command: &str, timeout: Duration) -> io::Result<St
             return Err(io::Error::new(io::ErrorKind::TimedOut, "SSH 远端命令超时"));
         }
         thread::sleep(Duration::from_millis(30));
+    }
+}
+
+fn ssh_failure_hint(stderr: &[u8]) -> &'static str {
+    let text = String::from_utf8_lossy(stderr);
+    if text.contains("Host key verification failed")
+        || text.contains("REMOTE HOST IDENTIFICATION HAS CHANGED")
+    {
+        "SSH 主机指纹尚未信任或发生变化：请在终端连接并与远端核对指纹，不要跳过主机密钥检查。"
+    } else if text.contains("Permission denied") {
+        "SSH 认证失败：核对用户名、私钥路径和 ssh-agent；加密密钥请先执行 ssh-add。"
+    } else if text.contains("Could not resolve") {
+        "SSH 主机名无法解析：请检查主机地址、DNS 或网络。"
+    } else if text.contains("Connection refused")
+        || text.contains("timed out")
+        || text.contains("No route to host")
+    {
+        "SSH 网络连接失败：请检查主机、端口、远端 SSH 服务和防火墙。"
+    } else if text.contains("python3") && text.contains("not found") {
+        "远端缺少 Python 3：按引导定向安装后重试。"
+    } else {
+        "SSH 或远端预检失败：请核对 SSH 认证、Python 3、libX11 和当前用户的图形会话。"
     }
 }
 
@@ -650,7 +702,13 @@ fn expand_home(value: &str) -> String {
 }
 
 fn home_path(value: &str) -> PathBuf {
-    PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(value)
+    let home = if cfg!(windows) {
+        std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))
+    } else {
+        std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
+    }
+    .unwrap_or_default();
+    PathBuf::from(home).join(value)
 }
 
 fn validate_profile(raw: &Value) -> io::Result<()> {
@@ -659,7 +717,8 @@ fn validate_profile(raw: &Value) -> io::Result<()> {
         raw: raw.clone(),
     };
     let user = profile.ssh_user();
-    if user.is_empty()
+    if user.starts_with('-')
+        || user.is_empty()
         || !user
             .chars()
             .all(|char| char.is_ascii_alphanumeric() || "._-".contains(char))
@@ -670,7 +729,8 @@ fn validate_profile(raw: &Value) -> io::Result<()> {
         ));
     }
     for value in [profile.ssh_host(), profile.remote_host()] {
-        if value.is_empty()
+        if value.starts_with('-')
+            || value.is_empty()
             || !value
                 .chars()
                 .all(|char| char.is_ascii_alphanumeric() || ".:_-".contains(char))
@@ -701,10 +761,17 @@ fn validate_profile(raw: &Value) -> io::Result<()> {
             "X11 窗口 ID 无效",
         ));
     }
-    if !profile.display().starts_with(':')
-        || !profile.display()[1..]
-            .chars()
-            .all(|char| char.is_ascii_digit())
+    let display = profile.display();
+    let parts: Vec<_> = display
+        .strip_prefix(':')
+        .unwrap_or_default()
+        .split('.')
+        .collect();
+    if !display.starts_with(':')
+        || parts.len() > 2
+        || parts
+            .iter()
+            .any(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()))
     {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "DISPLAY 无效"));
     }
@@ -712,17 +779,15 @@ fn validate_profile(raw: &Value) -> io::Result<()> {
     Ok(())
 }
 
-fn legacy_profile() -> Value {
-    json!({
-        "name": "Remote QQ",
-        "ssh": {"user": "remote-user", "host": "remote.example", "port": 22, "privateKeyFile": ""},
-        "tunnel": {"localPort": 15900, "remoteHost": "127.0.0.1", "remotePort": 5900},
-        "vnc": {"passwordFile": "", "remotePasswordFile": "/run/user/1000/x11vnc.pass"},
-        "window": {"display": ":0", "xauthority": "/run/user/1000/xauth", "id": "0x1", "className": "QQ"},
-        "helpers": {"windowList": "/home/remote-user/.local/lib/qq-window-viewer/list-qq-windows", "imeCapture": "/home/remote-user/.local/lib/qq-window-viewer/capture-ime"},
-        "children": {"enabled": true, "autoOpen": true, "minWidth": 80, "minHeight": 60},
-        "clipboard": {"sync": false}
-    })
+pub fn startup_profile() -> (Profile, bool, Option<String>) {
+    match load_profile() {
+        Ok(profile) => (profile, true, None),
+        Err(_) => (
+            onboarding::empty_profile(),
+            false,
+            Some("尚未配置，或配置文件无效；请使用向导检查。损坏的配置不会被覆盖。".into()),
+        ),
+    }
 }
 
 fn random_token() -> String {
@@ -795,7 +860,7 @@ fn stream_ime(mut stream: TcpStream, state: Arc<Mutex<ManagerState>>) {
 }
 
 fn handle_request(mut stream: TcpStream, state: Arc<Mutex<ManagerState>>, token: &str) {
-    let Ok((method, path, supplied_token)) = read_request(&mut stream) else {
+    let Ok((method, path, supplied_token, body)) = read_request(&mut stream) else {
         return;
     };
     if supplied_token.as_deref() != Some(token) {
@@ -808,6 +873,28 @@ fn handle_request(mut stream: TcpStream, state: Arc<Mutex<ManagerState>>, token:
     }
 
     let result = match (method.as_str(), path.as_str()) {
+        ("GET", "/setup") => state
+            .lock()
+            .map(|s| s.setup_status())
+            .map_err(|_| io::Error::other("manager locked")),
+        ("POST", "/setup/preflight")
+        | ("POST", "/setup/save")
+        | ("POST", "/main/prepare")
+        | ("POST", "/main/poll") => state
+            .lock()
+            .map_err(|_| io::Error::other("manager locked"))
+            .and_then(|mut manager| match path.as_str() {
+                "/setup/preflight" => manager.preflight(body),
+                "/setup/save" => manager.save_setup(body),
+                _ => manager.prepare_main(path == "/main/poll"),
+            }),
+        ("POST", "/main/stop") => state
+            .lock()
+            .map_err(|_| io::Error::other("manager locked"))
+            .map(|mut manager| {
+                manager.cleanup_all();
+                json!({"ok": true})
+            }),
         ("GET", "/status") => Ok(json!({"ok": true})),
         ("GET", "/windows") => state
             .lock()
@@ -850,39 +937,54 @@ fn handle_request(mut stream: TcpStream, state: Arc<Mutex<ManagerState>>, token:
     }
 }
 
-fn read_request(stream: &mut TcpStream) -> io::Result<(String, String, Option<String>)> {
+type Request = (String, String, Option<String>, Value);
+fn read_request(stream: &mut TcpStream) -> io::Result<Request> {
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-    let mut data = Vec::new();
-    let mut chunk = [0_u8; 1024];
+    let mut reader = BufReader::new(stream);
+    let mut head = String::new();
+    let mut length = 0;
     loop {
-        let count = stream.read(&mut chunk)?;
-        if count == 0 {
-            break;
+        let mut line = String::new();
+        if reader.by_ref().take(16 * 1024 + 1).read_line(&mut line)? == 0 {
+            return Err(io::Error::other("incomplete request"));
         }
-        data.extend_from_slice(&chunk[..count]);
-        if data.windows(4).any(|window| window == b"\r\n\r\n") {
-            break;
+        head.push_str(&line);
+        if head.len() > 16 * 1024 {
+            return Err(io::Error::other("headers too large"));
         }
-        if data.len() > 16 * 1024 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "request too large",
-            ));
+        if line == "\r\n" {
+            break;
         }
     }
-    let text = String::from_utf8_lossy(&data);
-    let mut lines = text.split("\r\n");
-    let request = lines
-        .next()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing request"))?;
-    let mut parts = request.split_whitespace();
-    let method = parts.next().unwrap_or_default().to_string();
-    let path = parts.next().unwrap_or_default().to_string();
-    let token = lines
-        .filter_map(|line| line.split_once(':'))
-        .find(|(name, _)| name.eq_ignore_ascii_case("x-pengux11vnc-token"))
-        .map(|(_, value)| value.trim().to_string());
-    Ok((method, path, token))
+    let mut lines = head.split("\r\n");
+    let mut request = lines.next().unwrap_or_default().split_whitespace();
+    let method = request.next().unwrap_or_default().to_owned();
+    let path = request.next().unwrap_or_default().to_owned();
+    let mut token = None;
+    for line in lines {
+        if let Some((name, value)) = line.split_once(':') {
+            if name.eq_ignore_ascii_case("x-pengux11vnc-token") {
+                token = Some(value.trim().to_owned());
+            }
+            if name.eq_ignore_ascii_case("content-length") {
+                length = value.trim().parse::<usize>().map_err(io::Error::other)?;
+            }
+            if name.eq_ignore_ascii_case("transfer-encoding") {
+                return Err(io::Error::other("chunked unsupported"));
+            }
+        }
+    }
+    if length > 32 * 1024 {
+        return Err(io::Error::other("body too large"));
+    }
+    let mut bytes = vec![0; length];
+    reader.read_exact(&mut bytes)?;
+    let body = if bytes.is_empty() {
+        json!({})
+    } else {
+        serde_json::from_slice(&bytes)?
+    };
+    Ok((method, path, token, body))
 }
 
 fn send_json(stream: &mut TcpStream, status: u16, body: Value) {
@@ -899,4 +1001,44 @@ fn send_json(stream: &mut TcpStream, status: u16, body: Value) {
     );
     let _ = stream.write_all(header.as_bytes());
     let _ = stream.write_all(&bytes);
+}
+
+#[cfg(test)]
+mod onboarding_http_tests {
+    use super::*;
+    fn request(
+        manager: &ManagerRuntime,
+        token: &str,
+        method: &str,
+        path: &str,
+        body: &str,
+    ) -> String {
+        let mut stream = TcpStream::connect(manager.url.trim_start_matches("http://")).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        write!(stream, "{method} {path} HTTP/1.1\r\nHost: localhost\r\nX-PenguX11VNC-Token: {token}\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response
+    }
+    #[test]
+    fn fresh_manager_opens_without_ssh_and_requires_auth_and_consent() {
+        let mut manager = ManagerRuntime::start(onboarding::empty_profile(), false, None).unwrap();
+        let forbidden = request(&manager, "wrong", "GET", "/setup", "");
+        assert!(forbidden.starts_with("HTTP/1.1 403"));
+        let setup = request(&manager, &manager.token, "GET", "/setup", "");
+        assert!(setup.contains("\"configured\":false"));
+        let prepare = request(&manager, &manager.token, "POST", "/main/prepare", "{}");
+        assert!(prepare.contains("请先使用首次连接向导"));
+        let save = request(
+            &manager,
+            &manager.token,
+            "POST",
+            "/setup/save",
+            "{\"consent\":false}",
+        );
+        assert!(save.contains("请确认仅启动所选"));
+        manager.stop();
+    }
 }
