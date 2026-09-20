@@ -189,6 +189,22 @@ export async function testTauriChildren(browser, app) {
       ),
       true,
     );
+    assert(
+      (await page.locator(".titlebar").boundingBox()).height <= 20,
+      "Collapsed custom titlebar must remain a thin bar",
+    );
+    await page.click("#titlebar-toggle");
+    assert.equal(
+      await page.evaluate(() =>
+        document.body.classList.contains("titlebar-expanded"),
+      ),
+      true,
+    );
+    assert(
+      (await page.locator(".titlebar").boundingBox()).height >= 34,
+      "Expanded custom titlebar must reveal the controls",
+    );
+    await page.click("#titlebar-toggle");
     await page.check("#system-titlebar");
     await page.waitForFunction(
       () => window.tauriFixture.decorationCalls.at(-1) === true,

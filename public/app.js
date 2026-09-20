@@ -221,6 +221,7 @@ function fitCollapsedScreen() {
   const screen = $("screen");
   const canvas = screen.querySelector("canvas");
   if (
+    isTauriShell() ||
     !document.body.classList.contains("ui-collapsed") ||
     settings.scale !== "fit" ||
     !canvas?.width ||
@@ -253,6 +254,7 @@ function fitCollapsedScreen() {
 function resizeWindowToAspect() {
   const canvas = $("screen").querySelector("canvas");
   if (
+    isTauriShell() ||
     !document.body.classList.contains("ui-collapsed") ||
     settings.scale !== "fit" ||
     !canvas?.width ||
@@ -296,6 +298,19 @@ function resizeWindowToAspect() {
 }
 let tauriDecorationsState;
 let tauriVncResizeKey;
+function setTitlebarExpanded(expanded, resize = true) {
+  const enabled =
+    Boolean(expanded) && document.body.classList.contains("no-system-titlebar");
+  document.body.classList.toggle("titlebar-expanded", enabled);
+  const toggle = $("titlebar-toggle");
+  if (toggle) {
+    toggle.textContent = enabled ? "⌃" : "⋯";
+    toggle.title = enabled ? "收起工具栏" : "展开工具栏";
+    toggle.setAttribute("aria-label", toggle.title);
+    toggle.setAttribute("aria-expanded", String(enabled));
+  }
+  if (resize && connected) geometry();
+}
 let tauriVncResizeInFlight = false;
 function currentTauriWindow() {
   return globalThis.__TAURI__?.window?.getCurrentWindow?.();
@@ -312,6 +327,7 @@ async function applyTauriTitlebar(decorated, notify = false) {
   const current = currentTauriWindow();
   const supported = isTauriShell() && Boolean(current?.setDecorations);
   document.body.classList.toggle("no-system-titlebar", supported && !decorated);
+  setTitlebarExpanded(false, false);
   if (!supported) return true;
   if (tauriDecorationsState === decorated) return true;
   try {
@@ -340,22 +356,16 @@ async function resizeTauriWindowToVnc() {
     return;
   }
   document.body.classList.add("tauri-vnc-frame");
-  const titlebarHeight = Math.ceil(
-    document.querySelector(".titlebar").getBoundingClientRect().height,
-  );
-  const footerHeight = Math.ceil(
-    $("geometry").parentElement.getBoundingClientRect().height,
-  );
+  const screenRect = $("screen").getBoundingClientRect();
+  const chromeWidth = Math.max(0, window.innerWidth - screenRect.width);
+  const chromeHeight = Math.max(0, window.innerHeight - screenRect.height);
   const availableWidth = Math.max(
     320,
-    (window.screen?.availWidth || window.innerWidth) - 24,
+    (window.screen?.availWidth || window.innerWidth) - chromeWidth - 24,
   );
   const availableHeight = Math.max(
     240,
-    (window.screen?.availHeight || window.innerHeight) -
-      titlebarHeight -
-      footerHeight -
-      24,
+    (window.screen?.availHeight || window.innerHeight) - chromeHeight - 24,
   );
   const autoScaleFactor =
     settings.scale === "actual"
@@ -376,13 +386,14 @@ async function resizeTauriWindowToVnc() {
   }
   const width = Math.max(1, Math.round(canvas.width * scaleFactor));
   const height = Math.max(1, Math.round(canvas.height * scaleFactor));
-  const innerHeight = height + titlebarHeight + footerHeight;
-  const key = `${canvas.width}x${canvas.height}:${width}x${innerHeight}:${settings.systemTitlebar}`;
+  const innerWidth = Math.max(1, Math.round(width + chromeWidth));
+  const innerHeight = Math.max(1, Math.round(height + chromeHeight));
+  const key = `${canvas.width}x${canvas.height}:${innerWidth}x${innerHeight}:${settings.systemTitlebar}`;
   if (tauriVncResizeKey === key || tauriVncResizeInFlight) return;
   tauriVncResizeKey = key;
   tauriVncResizeInFlight = true;
   try {
-    await current.setSize(tauriLogicalSize(width, innerHeight));
+    await current.setSize(tauriLogicalSize(innerWidth, innerHeight));
   } catch (error) {
     tauriVncResizeKey = undefined;
     if (settingsReady)
@@ -1174,6 +1185,10 @@ $("view-only").checked = settings.viewOnly;
 $("clipboard-sync").checked = settings.clipboardSync;
 $("child-auto-open").checked = settings.autoChildOpen;
 $("system-titlebar").checked = settings.systemTitlebar;
+$("titlebar-toggle").addEventListener("click", () => {
+  if (!document.body.classList.contains("no-system-titlebar")) return;
+  setTitlebarExpanded(!document.body.classList.contains("titlebar-expanded"));
+});
 $("system-titlebar").addEventListener("change", async () => {
   const enabled = $("system-titlebar").checked;
   settings.systemTitlebar = enabled;
@@ -1229,6 +1244,7 @@ document.addEventListener("pointerdown", (event) => {
   if (
     !settingsPanel.hidden &&
     !settingsPanel.contains(event.target) &&
+    !event.target.closest(".titlebar") &&
     event.target !== $("settings-toggle") &&
     !event.target.closest("#settings-toggle")
   )
