@@ -661,11 +661,20 @@ async function createTauriChildWindow(info, url) {
 async function cleanupChildEntry(key, entry) {
   if (!entry || entry.cleanupStarted) return;
   entry.cleanupStarted = true;
-  window.openedChildWindows?.delete(key);
+  if (window.openedChildWindows?.get(key) === entry)
+    window.openedChildWindows.delete(key);
   await api(
     `/api/sessions/${encodeURIComponent(entry.sessionId)}?session=main`,
     { method: "DELETE" },
   ).catch(() => {});
+}
+async function closeChildEntry(key, entry) {
+  // Await native IPC before forgetting the window. A rejected close must leave
+  // the entry available for the next poll; requesting close is not destruction.
+  if (!entry.closed) await entry.window.close();
+  // Native close() acknowledges the request before Destroyed is delivered.
+  // Keep tracking the window until that event; its handler performs cleanup.
+  if (!entry.tauri || entry.closed) await cleanupChildEntry(key, entry);
 }
 function renderChildWindows(windows) {
   const list = $("child-list");
@@ -721,9 +730,9 @@ async function openChildWindow(info, userInitiated = false) {
         entry.closed = true;
         void cleanupChildEntry(key, entry);
       };
-      child.once("tauri://destroyed", markClosed);
-      if (typeof child.onCloseRequested === "function")
-        child.onCloseRequested(markClosed).catch(() => {});
+      // Do not register onCloseRequested: Tauri then prevents the OS close
+      // and relies on JS destroy(). Native Rust cleanup already runs off-thread.
+      await child.once("tauri://destroyed", markClosed);
     }
     window.openedChildWindows.set(key, entry);
     renderChildWindows(window.lastChildWindows || []);
@@ -741,7 +750,7 @@ async function pollChildWindows(force = false) {
   if (
     !isMainSession ||
     !connected ||
-    (!settings.autoChildOpen && !force) ||
+    (!settings.autoChildOpen && !force && !window.openedChildWindows?.size) ||
     childPollInFlight
   )
     return;
@@ -760,20 +769,14 @@ async function pollChildWindows(force = false) {
         (!entry.tauri && entry.window?.closed === true);
       const remoteClosed = !visibleKeys.has(key);
       if (!childClosed && !remoteClosed) continue;
-      if (remoteClosed && !childClosed) {
-        try {
-          entry.window.close();
-        } catch {
-          // The native/browser child may already be closing.
-        }
-      }
-      await cleanupChildEntry(key, entry);
+      if (childClosed) await cleanupChildEntry(key, entry);
+      else await closeChildEntry(key, entry);
     }
     $("child-status").textContent = windows.length
       ? `发现 ${windows.length} 个 QQ 子窗口。`
       : "没有可见的 QQ 子窗口。";
     renderChildWindows(windows);
-    if (!settings.autoChildOpen && force) return;
+    if (!settings.autoChildOpen) return;
     for (const info of windows) {
       if (window.openedChildWindows.has(info.id.toLowerCase())) continue;
       await openChildWindow(info);
@@ -981,11 +984,11 @@ async function cleanupOpenedChildSessions() {
   const entries = [...(window.openedChildWindows?.entries() || [])];
   for (const [key, entry] of entries) {
     try {
-      await Promise.resolve(entry.window.close());
+      await closeChildEntry(key, entry);
     } catch {
-      // The native/browser child may already be closing.
+      // Keep the entry so it can be retried after reconnecting.
+      toast("子窗口关闭失败，请重试或使用窗口标题栏关闭。");
     }
-    await cleanupChildEntry(key, entry);
   }
 }
 async function stopMainConnection() {
@@ -1049,12 +1052,11 @@ $("clipboard-sync").addEventListener("change", () => {
 $("child-auto-open").addEventListener("change", () => {
   settings.autoChildOpen = $("child-auto-open").checked;
   save();
-  if (settings.autoChildOpen) startChildMonitor();
-  else {
-    stopChildMonitor();
+  // Disabling auto-open must not disable cleanup of existing child windows.
+  startChildMonitor();
+  if (!settings.autoChildOpen)
     $("child-status").textContent =
-      "自动打开已关闭；仍可在配置档中手动管理子窗口。";
-  }
+      "自动打开已关闭；已打开的子窗口仍会自动回收。";
 });
 $("child-refresh").addEventListener("click", () => pollChildWindows(true));
 $("view-only").addEventListener("change", () => {

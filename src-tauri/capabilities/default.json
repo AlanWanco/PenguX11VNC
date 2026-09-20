@@ -6,5 +6,9 @@
     "urls": ["http://127.0.0.1:*/*"]
   },
   "windows": ["*"],
-  "permissions": ["core:default", "core:webview:allow-create-webview-window"]
+  "permissions": [
+    "core:default",
+    "core:webview:allow-create-webview-window",
+    "core:window:allow-close"
+  ]
 }

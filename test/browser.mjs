@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { chromium } from "@playwright/test";
 import { startServer } from "../server.js";
 import { startMock } from "./mock-rfb.mjs";
+import { testTauriChildren } from "./tauri-children.mjs";
 
 const mock = await startMock();
 const settingsDirectory = await mkdtemp(
@@ -243,6 +244,7 @@ try {
     "Reconnect duplicated canvas",
   );
   assert.deepEqual(errors, []);
+  await testTauriChildren(browser, app);
   console.log(
     "PASS: lossless negotiation, frame rate, 3 aspect ratios, scaled pointer/IME overlay, F11/brackets, 25% wheel, view-only, reconnect, Unicode guard",
   );
