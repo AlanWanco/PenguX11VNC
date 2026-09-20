@@ -221,6 +221,7 @@ jobs:
           docker run --rm --platform linux/arm64 \
             -e NODE_VERSION="$NODE_VERSION" \
             -e SHORT_SHA="${{ steps.metadata.outputs.short_sha }}" \
+            -e APPIMAGE_EXTRACT_AND_RUN=1 \
             -v "$WORKSPACE:/workspace" \
             -w /workspace \
             ubuntu:24.04 \

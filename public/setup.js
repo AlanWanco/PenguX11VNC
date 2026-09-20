@@ -1,4 +1,5 @@
 const $ = (id) => document.getElementById(id);
+const DRAFT_KEY = "pengux11vnc.setup-draft.v1";
 const fragment = new URLSearchParams(location.hash.slice(1));
 let token = fragment.get("token");
 try {
@@ -14,6 +15,47 @@ let configured = false;
 const status = (text) => {
   $("setup-status").textContent = text;
 };
+function readDraft() {
+  try {
+    const value = JSON.parse(localStorage.getItem(DRAFT_KEY) || "null");
+    return value && typeof value === "object" ? value : null;
+  } catch {
+    return null;
+  }
+}
+function formDraft() {
+  return {
+    name: $("setup-name").value,
+    host: $("setup-host").value,
+    port: $("setup-port").value,
+    user: $("setup-user").value,
+    key: $("setup-key").value,
+    passwordPath: $("setup-password-path").value,
+  };
+}
+function saveDraft() {
+  try {
+    localStorage.setItem(DRAFT_KEY, JSON.stringify(formDraft()));
+  } catch {
+    /* Draft persistence is optional. */
+  }
+}
+function clearDraft() {
+  try {
+    localStorage.removeItem(DRAFT_KEY);
+  } catch {
+    /* Storage is optional. */
+  }
+}
+function applyFormValues(value) {
+  if (!value) return;
+  $("setup-name").value = value.name || "Linux QQ";
+  $("setup-host").value = value.host || "";
+  $("setup-user").value = value.user || "";
+  $("setup-port").value = value.port || 22;
+  $("setup-key").value = value.key || "";
+  $("setup-password-path").value = value.passwordPath || "";
+}
 async function api(path, body) {
   const response = await fetch(path, {
     method: body === undefined ? "GET" : "POST",
@@ -32,7 +74,8 @@ function updateControls() {
   $("setup-window").disabled = busy;
   $("setup-consent").disabled = busy;
   $("setup-recover").disabled = busy;
-  $("setup-back").disabled = busy || !configured;
+  $("setup-back").disabled = busy;
+  $("setup-draft-save").disabled = busy;
   $("setup-save").disabled =
     busy ||
     !report?.x11vnc ||
@@ -47,13 +90,17 @@ function invalidate() {
   status("配置已修改，请重新预检；尚未保存。");
   updateControls();
 }
-$("setup-fields").addEventListener("input", invalidate);
+$("setup-fields").addEventListener("input", () => {
+  saveDraft();
+  invalidate();
+});
 $("setup-window").addEventListener("change", updateControls);
 $("setup-consent").addEventListener("change", updateControls);
 $("setup-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   if (busy) return;
   busy = true;
+  saveDraft();
   report = undefined;
   $("setup-result").hidden = true;
   $("setup-consent").checked = false;
@@ -118,6 +165,11 @@ $("setup-form").addEventListener("submit", async (event) => {
           }`,
     );
   } catch (error) {
+    const item = document.createElement("li");
+    item.textContent = `预检失败 · ${error.message}`;
+    $("setup-checks").replaceChildren(item);
+    $("setup-window").replaceChildren(new Option("预检成功后选择主窗口", ""));
+    $("setup-result").hidden = false;
     status(error.message);
     $("setup-help").open = true;
   } finally {
@@ -136,6 +188,7 @@ $("setup-save").addEventListener("click", async () => {
       consent: $("setup-consent").checked,
       autoRecover: $("setup-recover").checked,
     });
+    clearDraft();
     location.href = `./#token=${encodeURIComponent(token)}`;
   } catch (error) {
     status(error.message);
@@ -143,6 +196,12 @@ $("setup-save").addEventListener("click", async () => {
     busy = false;
     updateControls();
   }
+});
+$("setup-draft-save").addEventListener("click", () => {
+  saveDraft();
+  status(
+    "已保存本机填写草稿；尚未保存为可连接配置，也没有启动远端服务。修复预检后可继续。",
+  );
 });
 $("setup-back").addEventListener("click", () => {
   location.href = `./#token=${encodeURIComponent(token)}`;
@@ -155,13 +214,21 @@ try {
     );
   configured = data.configured;
   const p = data.profile || {};
-  $("setup-name").value = p.name || "Linux QQ";
-  $("setup-host").value = p.ssh?.host || "";
-  $("setup-user").value = p.ssh?.user || "";
-  $("setup-port").value = p.ssh?.port || 22;
-  $("setup-key").value = p.ssh?.privateKeyFile || "";
-  $("setup-password-path").value = p.vnc?.remotePasswordFile || "";
-  status(data.startupError || "配置只会在确认保存时写入。首先运行只读预检。");
+  const profileValues = {
+    name: p.name || "Linux QQ",
+    host: p.ssh?.host || "",
+    user: p.ssh?.user || "",
+    port: p.ssh?.port || 22,
+    key: p.ssh?.privateKeyFile || "",
+    passwordPath: p.vnc?.remotePasswordFile || "",
+  };
+  const draft = !data.configured ? readDraft() : null;
+  applyFormValues(draft || profileValues);
+  status(
+    draft
+      ? "已恢复上次未完成的本机填写；请重新运行只读预检。"
+      : data.startupError || "配置只会在确认保存时写入。首先运行只读预检。",
+  );
   updateControls();
 } catch (error) {
   status(error.message);

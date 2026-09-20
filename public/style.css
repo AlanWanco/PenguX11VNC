@@ -678,6 +678,9 @@ body.setup-page {
   grid-template-columns: 1fr 1fr;
   gap: 12px;
 }
+#setup-draft-save {
+  margin-top: 10px;
+}
 .setup-card .setup-checkbox {
   display: flex;
   align-items: flex-start;

@@ -106,6 +106,12 @@
           <button type="submit" id="setup-probe" class="primary">
             2 · 运行只读预检
           </button>
+          <button type="button" id="setup-draft-save" class="secondary">
+            保存填写内容（暂不连接）
+          </button>
+          <p class="help">
+            预检失败时也可以保存本机填写草稿；这不会保存为可连接配置，也不会启动远端服务。
+          </p>
           <p class="help">
             预检只读取当前用户 QQ 进程及 X11
             窗口元数据、依赖状态和密码文件权限；不读取聊天文字、截图或剪贴板，不安装软件、不启动服务。
@@ -200,7 +206,7 @@ chmod 600 ~/.config/qq-window-viewer/vnc.pass</pre>
         ~/.config/qq-window-viewer/connections.json。保存前备份原文件；令牌、密码、私钥不写入此配置。当前仍需要系统
         OpenSSH；安装包已内置 Node.js。
       </p>
-      <button id="setup-back" disabled>返回已有连接（不保存）</button>
+      <button id="setup-back">返回首页（不保存）</button>
     </article>
   </body>
 </html>

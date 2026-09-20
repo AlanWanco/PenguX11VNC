@@ -646,14 +646,17 @@ fn run_ssh(profile: &Profile, command: &str, timeout: Duration) -> io::Result<St
     }
 }
 
-fn ssh_failure_hint(stderr: &[u8]) -> &'static str {
+fn ssh_failure_hint(stderr: &[u8]) -> String {
     let text = String::from_utf8_lossy(stderr);
-    if text.contains("Host key verification failed")
+    let hint = if text.contains("Host key verification failed")
         || text.contains("REMOTE HOST IDENTIFICATION HAS CHANGED")
     {
         "SSH 主机指纹尚未信任或发生变化：请在终端连接并与远端核对指纹，不要跳过主机密钥检查。"
-    } else if text.contains("Permission denied") {
-        "SSH 认证失败：核对用户名、私钥路径和 ssh-agent；加密密钥请先执行 ssh-add。"
+    } else if text.contains("Permission denied")
+        || text.contains("sign_and_send_pubkey")
+        || text.contains("authentication agent")
+    {
+        "SSH 认证失败：Windows 请填写私钥路径或确认 ssh-agent 已运行并已加载密钥；加密密钥先执行 ssh-add。"
     } else if text.contains("Could not resolve") {
         "SSH 主机名无法解析：请检查主机地址、DNS 或网络。"
     } else if text.contains("Connection refused")
@@ -665,6 +668,20 @@ fn ssh_failure_hint(stderr: &[u8]) -> &'static str {
         "远端缺少 Python 3：按引导定向安装后重试。"
     } else {
         "SSH 或远端预检失败：请核对 SSH 认证、Python 3、libX11 和当前用户的图形会话。"
+    };
+    let detail = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| {
+            line.chars()
+                .filter(|character| !character.is_control())
+                .take(240)
+                .collect::<String>()
+        });
+    match detail {
+        Some(detail) => format!("{hint} SSH 返回：{detail}"),
+        None => hint.to_string(),
     }
 }
 
