@@ -112,7 +112,6 @@ chmod 600 ~/.config/qq-window-viewer/connections.json
 | `clipboard.sync`                       | 是否允许此配置档启用剪贴板同步，默认 `false`                                                                               |
 | `viewer.bitrate`                       | `lossless`、`high`、`balanced`、`low`；默认无损                                                                            |
 | `viewer.frameRate`                     | `0` 不限，或 `5/10/15/24/30/60`；默认 `30`                                                                                 |
-| `viewer.uiCollapsed`                   | 是否启动时收起 UI；收起后仍保留底部状态栏                                                                                  |
 
 主窗口运行时修改的显示设置会保存到 `~/.config/qq-window-viewer/settings.json`；QQ 子窗口继承主窗口设置。
 
@@ -152,7 +151,7 @@ python3 tools/launch.py --no-open
 2. 「适应」保持比例，「1:1」查看原始像素；
 3. 设置中调滚轮、传输码率和帧率；
 4. 需要时开启双向剪贴板同步；
-5. 「收起」隐藏四周 UI，但保留底部状态栏；鼠标移到顶部边缘可暂时展开，悬浮球可拖动并恢复。
+5. 关闭 Tauri 系统标题栏后，可点击顶部右侧按钮展开细工具栏；关闭按钮固定在顶部栏最右侧。
 
 ## 7. 常见问题
 

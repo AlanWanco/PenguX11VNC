@@ -1,0 +1,16 @@
+# PenguX11VNC application commands used by the main webview.
+
+[[permission]]
+identifier = "allow-set-main-window-aspect"
+description = "允许主窗口设置和清除 VNC 内容比例约束。"
+commands.allow = ["set_main_window_aspect"]
+
+[[permission]]
+identifier = "allow-read-clipboard-files"
+description = "允许读取用户主动选择的本机文件剪贴板预览。"
+commands.allow = ["read_clipboard_files"]
+
+[[permission]]
+identifier = "allow-upload-clipboard-files"
+description = "允许将用户确认的文件通过 SSH 上传并写入远端文件剪贴板。"
+commands.allow = ["upload_clipboard_files"]

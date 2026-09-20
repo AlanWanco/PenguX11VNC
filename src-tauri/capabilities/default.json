@@ -12,6 +12,9 @@
     "core:window:allow-close",
     "core:window:allow-set-size",
     "core:window:allow-set-decorations",
-    "core:window:allow-start-dragging"
+    "core:window:allow-start-dragging",
+    "allow-set-main-window-aspect",
+    "allow-read-clipboard-files",
+    "allow-upload-clipboard-files"
   ]
 }

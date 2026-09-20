@@ -2734,13 +2734,17 @@ version = "0.1.0"
 dependencies = [
  "arboard",
  "dbus",
+ "gtk",
  "keyring",
+ "objc2-app-kit",
+ "objc2-foundation",
  "rand 0.9.5",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
  "url",
+ "windows-sys 0.59.0",
  "winreg",
 ]
 

@@ -44,7 +44,6 @@
         "frameRate": 30,
         "clipboardSync": false,
         "autoChildOpen": true,
-        "uiCollapsed": false,
         "systemTitlebar": true
       }
     }

@@ -124,7 +124,6 @@ test("viewer settings persist for the main session", async (t) => {
     frameRate: 15,
     clipboardSync: false,
     autoChildOpen: true,
-    uiCollapsed: false,
     systemTitlebar: true,
   });
   const layoutSaved = await fetch(`${app.origin}/api/layout?session=main`, {

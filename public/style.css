@@ -91,6 +91,37 @@ button.danger {
   font-size: 16px;
   line-height: 1;
 }
+.bar-icon,
+.bar-icon-button {
+  display: block;
+}
+.bar-icon {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.bar-icon-button {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 0;
+}
+.titlebar-toggle-icon .expanded-icon {
+  display: none;
+}
+.titlebar-toggle[data-expanded="true"] .compact-icon {
+  display: none;
+}
+.titlebar-toggle[data-expanded="true"] .expanded-icon {
+  display: block;
+}
 body.no-system-titlebar:not(.titlebar-expanded) .titlebar {
   height: 20px;
   position: relative;
@@ -121,7 +152,7 @@ body.no-system-titlebar.titlebar-expanded .titlebar {
 }
 body.no-system-titlebar.titlebar-expanded .titlebar-toggle {
   display: inline-flex;
-  order: 3;
+  order: 4;
   width: 24px;
   height: 28px;
   padding: 0;
@@ -149,8 +180,14 @@ body.no-system-titlebar.titlebar-expanded nav button {
   padding: 4px 7px;
   font-size: 11px;
 }
-body.no-system-titlebar.titlebar-expanded #fullscreen {
-  font-size: 18px;
+body.no-system-titlebar.titlebar-expanded #fullscreen.bar-icon-button {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+}
+body.no-system-titlebar.titlebar-expanded .titlebar-toggle .bar-icon {
+  width: 15px;
+  height: 15px;
 }
 body.no-system-titlebar:not(.titlebar-expanded) .window-close-control {
   display: none;
@@ -205,6 +242,7 @@ nav {
   display: flex;
   align-items: center;
   gap: 3px;
+  margin-left: auto;
 }
 .separator {
   height: 17px;
@@ -212,19 +250,27 @@ nav {
   background: var(--border);
   margin: 0 7px;
 }
-#fullscreen {
-  font-size: 22px;
-  line-height: 20px;
+#fullscreen.bar-icon-button {
+  font-size: 0;
+  line-height: 0;
 }
 .window-close-control {
   display: none;
+  order: 5;
+  flex: none;
   color: #f3a8b6;
-  font-size: 20px;
-  line-height: 18px;
-  padding: 6px 10px;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  align-items: center;
+  justify-content: center;
+  line-height: 0;
 }
-body.no-system-titlebar.titlebar-expanded .window-close-control {
+body.tauri-shell .window-close-control {
   display: inline-flex;
+}
+body.no-system-titlebar:not(.titlebar-expanded) .window-close-control {
+  display: none;
 }
 body.no-system-titlebar .titlebar {
   cursor: grab;
@@ -278,108 +324,6 @@ body.tauri-vnc-frame main {
 #ime-overlay[hidden] {
   display: none;
 }
-.restore-bubble {
-  display: none;
-  position: fixed;
-  right: 22px;
-  bottom: 22px;
-  z-index: 8;
-  width: 42px;
-  height: 42px;
-  padding: 0;
-  place-items: center;
-  border: 1px solid #cbb5f766;
-  border-radius: 50%;
-  background: #292238ef;
-  color: var(--accent);
-  box-shadow: 0 8px 34px #0008;
-  font-size: 20px;
-  backdrop-filter: blur(18px);
-  touch-action: none;
-  user-select: none;
-}
-body.ui-collapsed .restore-bubble {
-  bottom: 42px;
-}
-body.ui-collapsed .restore-bubble[data-dragging="true"] {
-  transition: none;
-}
-#edge-reveal {
-  display: none;
-}
-body.ui-collapsed .titlebar {
-  height: 0;
-  padding-top: 0;
-  padding-bottom: 0;
-  border-bottom: 0;
-  overflow: hidden;
-  transform: translateY(-100%);
-  pointer-events: none;
-  transition:
-    height 0.22s ease,
-    transform 0.22s ease,
-    padding 0.22s ease;
-}
-body.ui-collapsed footer {
-  height: 30px;
-  border-top: 1px solid var(--border);
-  overflow: hidden;
-  padding-top: 0;
-  padding-bottom: 0;
-}
-body.ui-collapsed main {
-  min-height: 0;
-}
-body.ui-collapsed #screen {
-  inset: 0;
-  border-radius: 0;
-}
-body.ui-collapsed .restore-bubble {
-  display: grid;
-}
-body.no-system-titlebar.ui-collapsed .titlebar {
-  position: relative;
-  inset: auto;
-  height: 20px;
-  padding: 0 5px;
-  border-bottom: 1px solid #6e4ca766;
-  transform: none;
-  pointer-events: auto;
-}
-body.no-system-titlebar.ui-collapsed.titlebar-expanded .titlebar {
-  height: 36px;
-  padding: 0 10px;
-  border-bottom-color: var(--border);
-}
-body.no-system-titlebar.ui-collapsed .restore-bubble {
-  bottom: 42px;
-}
-body.ui-collapsed.ui-peek .titlebar {
-  position: fixed;
-  inset: 0 0 auto;
-  height: 68px;
-  padding: 0 22px;
-  border-bottom: 1px solid var(--border);
-  transform: translateY(0);
-  pointer-events: auto;
-  box-shadow: 0 12px 40px #0008;
-}
-body.ui-collapsed.ui-peek .restore-bubble {
-  opacity: 0;
-  pointer-events: none;
-}
-body.ui-collapsed.ui-peek #screen {
-  inset: 0;
-}
-body.no-system-titlebar.ui-collapsed.ui-peek:not(.titlebar-expanded) .titlebar {
-  height: 20px;
-  padding: 0 5px;
-}
-body.no-system-titlebar.ui-collapsed.ui-peek.titlebar-expanded .titlebar {
-  height: 36px;
-  padding: 0 10px;
-}
-
 .welcome {
   position: absolute;
   inset: 0;
@@ -725,9 +669,6 @@ body.immersive footer {
 body.immersive #screen {
   inset: 0;
   border-radius: 0;
-}
-body.ui-collapsed #ime-overlay {
-  z-index: 2;
 }
 @keyframes pulse {
   50% {

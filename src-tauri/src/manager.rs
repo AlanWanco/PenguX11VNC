@@ -862,7 +862,7 @@ fn set_remote_file_clipboard(profile: &Profile, paths: &[String]) -> io::Result<
         .join("\r\n");
     payload.push_str("\r\n");
     let command = format!(
-        "set -eu; export DISPLAY={display}; export XAUTHORITY={auth}; export XDG_RUNTIME_DIR=\"${{XDG_RUNTIME_DIR:-$(dirname -- \"$XAUTHORITY\")}}\"; export WAYLAND_DISPLAY=\"${{WAYLAND_DISPLAY:-wayland-0}}\"; payload={payload}; if command -v wl-copy >/dev/null 2>&1 && printf '%s' \"$payload\" | wl-copy --type text/uri-list; then exit 0; fi; if command -v xclip >/dev/null 2>&1 && printf '%s' \"$payload\" | xclip -selection clipboard -t text/uri-list -i; then exit 0; fi; if command -v python3 >/dev/null 2>&1; then nohup python3 -c {helper} \"$payload\" >/dev/null 2>&1 </dev/null & helper_pid=$!; sleep 0.2; if kill -0 \"$helper_pid\" 2>/dev/null; then exit 0; fi; fi; exit 127",
+        "set -eu; export DISPLAY={display}; export XAUTHORITY={auth}; export XDG_RUNTIME_DIR=\"${{XDG_RUNTIME_DIR:-$(dirname -- \"$XAUTHORITY\")}}\"; export WAYLAND_DISPLAY=\"${{WAYLAND_DISPLAY:-wayland-0}}\"; payload={payload}; if command -v xclip >/dev/null 2>&1 && printf '%s' \"$payload\" | xclip -selection clipboard -t text/uri-list -i; then exit 0; fi; if command -v wl-copy >/dev/null 2>&1 && printf '%s' \"$payload\" | wl-copy --type text/uri-list; then exit 0; fi; if command -v python3 >/dev/null 2>&1; then nohup python3 -c {helper} \"$payload\" >/dev/null 2>&1 </dev/null & helper_pid=$!; sleep 0.2; if kill -0 \"$helper_pid\" 2>/dev/null; then exit 0; fi; fi; exit 127",
         display = shell_quote(&profile.display()),
         auth = shell_quote(&profile.xauthority()),
         payload = shell_quote(&payload),

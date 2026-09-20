@@ -250,10 +250,13 @@ export async function testTauriChildren(browser, app) {
           (item) => item.label === "qq-child-2",
         ).url,
     );
+    const currentScale = await page.evaluate(() => {
+      const canvas = document.querySelector("canvas");
+      return canvas.getBoundingClientRect().width / canvas.width;
+    });
     assert(
       Math.abs(
-        Number(new URL(childUrl).searchParams.get("vncScale")) -
-          fitted.size.width / fitted.canvasWidth,
+        Number(new URL(childUrl).searchParams.get("vncScale")) - currentScale,
       ) < 0.002,
       "Child Tauri window must inherit the main VNC scale",
     );

@@ -15,6 +15,11 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Mutex,
 };
+#[cfg(target_os = "windows")]
+use std::sync::{
+    atomic::{AtomicI32, AtomicU64},
+    OnceLock,
+};
 use std::thread;
 use std::time::Duration;
 use tauri::{
@@ -54,6 +59,9 @@ fn set_main_window_aspect(app: AppHandle, width: f64, height: f64) -> Result<(),
         if let Ok(mut last_size) = state.last_size.lock() {
             *last_size = None;
         }
+        if let Some(window) = app.get_webview_window("main") {
+            apply_native_main_window_aspect(&window, None)?;
+        }
         return Ok(());
     }
     let value = width / height;
@@ -62,6 +70,7 @@ fn set_main_window_aspect(app: AppHandle, width: f64, height: f64) -> Result<(),
     }
     *ratio = Some(value);
     if let Some(window) = app.get_webview_window("main") {
+        apply_native_main_window_aspect(&window, Some(value))?;
         if let Ok(size) = window.inner_size() {
             if let Ok(mut last_size) = state.last_size.lock() {
                 *last_size = Some(size);
@@ -171,7 +180,271 @@ fn corrected_main_window_size(
     }
 }
 
+#[cfg(target_os = "windows")]
+struct WindowsAspectHook {
+    original_proc: isize,
+    ratio_bits: AtomicU64,
+    frame_width: AtomicI32,
+    frame_height: AtomicI32,
+    last_width: AtomicI32,
+    last_height: AtomicI32,
+}
+
+#[cfg(target_os = "windows")]
+static WINDOWS_ASPECT_HOOKS: OnceLock<Mutex<HashMap<isize, Box<WindowsAspectHook>>>> =
+    OnceLock::new();
+
+#[cfg(target_os = "windows")]
+fn windows_aspect_hooks() -> &'static Mutex<HashMap<isize, Box<WindowsAspectHook>>> {
+    WINDOWS_ASPECT_HOOKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(target_os = "windows")]
+fn windows_sizing_uses_width(edge: u32, width_delta: i32, height_delta: i32) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        WMSZ_BOTTOM, WMSZ_BOTTOMLEFT, WMSZ_BOTTOMRIGHT, WMSZ_LEFT, WMSZ_RIGHT, WMSZ_TOP,
+        WMSZ_TOPLEFT, WMSZ_TOPRIGHT,
+    };
+
+    match edge {
+        WMSZ_LEFT | WMSZ_RIGHT => true,
+        WMSZ_TOP | WMSZ_BOTTOM => false,
+        WMSZ_TOPLEFT | WMSZ_TOPRIGHT | WMSZ_BOTTOMLEFT | WMSZ_BOTTOMRIGHT => {
+            width_delta >= height_delta
+        }
+        _ => width_delta >= height_delta,
+    }
+}
+
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn windows_aspect_proc(
+    hwnd: windows_sys::Win32::Foundation::HWND,
+    message: u32,
+    wparam: windows_sys::Win32::Foundation::WPARAM,
+    lparam: windows_sys::Win32::Foundation::LPARAM,
+) -> windows_sys::Win32::Foundation::LRESULT {
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CallWindowProcW, DefWindowProcW, WM_NCDESTROY, WM_SIZING,
+    };
+
+    let key = hwnd as isize;
+    let mut remove = false;
+    let original_proc = {
+        let hooks = windows_aspect_hooks();
+        let mut guard = hooks.lock().expect("Windows aspect hook mutex poisoned");
+        let Some(hook) = guard.get_mut(&key) else {
+            return DefWindowProcW(hwnd, message, wparam, lparam);
+        };
+        if message == WM_SIZING && lparam != 0 {
+            let rect = &mut *(lparam as *mut RECT);
+            let frame_width = hook.frame_width.load(Ordering::Acquire).max(0);
+            let frame_height = hook.frame_height.load(Ordering::Acquire).max(0);
+            let ratio = f64::from_bits(hook.ratio_bits.load(Ordering::Acquire));
+            if ratio.is_finite() && ratio > 0.0 {
+                let proposed_width = (rect.right - rect.left).max(frame_width + 320);
+                let proposed_height = (rect.bottom - rect.top).max(frame_height + 200);
+                let last_width = hook.last_width.load(Ordering::Acquire);
+                let last_height = hook.last_height.load(Ordering::Acquire);
+                let width_delta = (proposed_width - last_width).abs();
+                let height_delta = (proposed_height - last_height).abs();
+                let edge = wparam as u32;
+                let use_width = windows_sizing_uses_width(edge, width_delta, height_delta);
+                let (target_width, target_height) = if use_width {
+                    let inner_width = (proposed_width - frame_width).max(320);
+                    let inner_height = (f64::from(inner_width) / ratio).round().max(200.0) as i32;
+                    (inner_width + frame_width, inner_height + frame_height)
+                } else {
+                    let inner_height = (proposed_height - frame_height).max(200);
+                    let inner_width = (f64::from(inner_height) * ratio).round().max(320.0) as i32;
+                    (inner_width + frame_width, inner_height + frame_height)
+                };
+                let anchor_right = matches!(
+                    edge,
+                    windows_sys::Win32::UI::WindowsAndMessaging::WMSZ_LEFT
+                        | windows_sys::Win32::UI::WindowsAndMessaging::WMSZ_TOPLEFT
+                        | windows_sys::Win32::UI::WindowsAndMessaging::WMSZ_BOTTOMLEFT
+                );
+                let anchor_bottom = matches!(
+                    edge,
+                    windows_sys::Win32::UI::WindowsAndMessaging::WMSZ_TOP
+                        | windows_sys::Win32::UI::WindowsAndMessaging::WMSZ_TOPLEFT
+                        | windows_sys::Win32::UI::WindowsAndMessaging::WMSZ_TOPRIGHT
+                );
+                if anchor_right {
+                    rect.left = rect.right - target_width;
+                } else {
+                    rect.right = rect.left + target_width;
+                }
+                if anchor_bottom {
+                    rect.top = rect.bottom - target_height;
+                } else {
+                    rect.bottom = rect.top + target_height;
+                }
+                hook.last_width.store(target_width, Ordering::Release);
+                hook.last_height.store(target_height, Ordering::Release);
+            }
+        }
+        if message == WM_NCDESTROY {
+            remove = true;
+        }
+        hook.original_proc
+    };
+    if remove {
+        let _ = windows_aspect_hooks()
+            .lock()
+            .map(|mut hooks| hooks.remove(&key));
+    }
+    let original: windows_sys::Win32::UI::WindowsAndMessaging::WNDPROC =
+        std::mem::transmute(original_proc);
+    if original.is_some() {
+        CallWindowProcW(original, hwnd, message, wparam, lparam)
+    } else {
+        DefWindowProcW(hwnd, message, wparam, lparam)
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn apply_native_main_window_aspect(
+    window: &tauri::WebviewWindow,
+    ratio: Option<f64>,
+) -> Result<(), String> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetWindowLongPtrW, GWLP_WNDPROC,
+    };
+
+    let hwnd = window
+        .hwnd()
+        .map_err(|error| format!("无法取得 Windows 主窗口：{error}"))?
+        .0 as windows_sys::Win32::Foundation::HWND;
+    let key = hwnd as isize;
+    let inner = window
+        .inner_size()
+        .map_err(|error| format!("无法取得 Windows 内容尺寸：{error}"))?;
+    let outer = window
+        .outer_size()
+        .map_err(|error| format!("无法取得 Windows 外框尺寸：{error}"))?;
+    let frame_width = outer.width.saturating_sub(inner.width).min(i32::MAX as u32) as i32;
+    let frame_height = outer
+        .height
+        .saturating_sub(inner.height)
+        .min(i32::MAX as u32) as i32;
+    let ratio_bits = ratio.map_or(0, f64::to_bits);
+    let hooks = windows_aspect_hooks();
+    let mut hooks = hooks
+        .lock()
+        .map_err(|_| "Windows 比例锁定状态不可用".to_string())?;
+    if let Some(hook) = hooks.get_mut(&key) {
+        hook.ratio_bits.store(ratio_bits, Ordering::Release);
+        hook.frame_width.store(frame_width, Ordering::Release);
+        hook.frame_height.store(frame_height, Ordering::Release);
+        hook.last_width.store(outer.width as i32, Ordering::Release);
+        hook.last_height
+            .store(outer.height as i32, Ordering::Release);
+        return Ok(());
+    }
+    let original_proc = unsafe { GetWindowLongPtrW(hwnd, GWLP_WNDPROC) };
+    if original_proc == 0 {
+        return Err("无法安装 Windows 窗口比例处理器".to_string());
+    }
+    let hook = Box::new(WindowsAspectHook {
+        original_proc,
+        ratio_bits: AtomicU64::new(ratio_bits),
+        frame_width: AtomicI32::new(frame_width),
+        frame_height: AtomicI32::new(frame_height),
+        last_width: AtomicI32::new(outer.width as i32),
+        last_height: AtomicI32::new(outer.height as i32),
+    });
+    let replacement = windows_aspect_proc as *const () as isize;
+    let previous = unsafe { SetWindowLongPtrW(hwnd, GWLP_WNDPROC, replacement) };
+    if previous == 0 {
+        return Err("无法安装 Windows 窗口比例处理器".to_string());
+    }
+    hooks.insert(key, hook);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn apply_native_main_window_aspect(
+    window: &tauri::WebviewWindow,
+    ratio: Option<f64>,
+) -> Result<(), String> {
+    use gtk::{gdk, prelude::*};
+
+    let native = window
+        .gtk_window()
+        .map_err(|error| format!("无法取得 GTK 主窗口：{error}"))?;
+    match ratio {
+        Some(ratio) => {
+            let geometry = gdk::Geometry::new(
+                320,
+                200,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                ratio,
+                ratio,
+                gdk::Gravity::Center,
+            );
+            native.set_geometry_hints(
+                None::<&gtk::Window>,
+                Some(&geometry),
+                gdk::WindowHints::MIN_SIZE | gdk::WindowHints::ASPECT,
+            );
+        }
+        None => native.set_geometry_hints(None::<&gtk::Window>, None, gdk::WindowHints::ASPECT),
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn apply_native_main_window_aspect(
+    window: &tauri::WebviewWindow,
+    ratio: Option<f64>,
+) -> Result<(), String> {
+    use objc2_app_kit::NSWindow;
+    use objc2_foundation::NSSize;
+
+    let native = window
+        .ns_window()
+        .map_err(|error| format!("无法取得 macOS 主窗口：{error}"))?;
+    // NSWindow applies this constraint to the content area, so the native
+    // title bar is excluded without manually guessing its height.
+    unsafe {
+        let native = &*native.cast::<NSWindow>();
+        native.setContentAspectRatio(
+            ratio.map_or(NSSize::new(0.0, 0.0), |ratio| NSSize::new(ratio, 1.0)),
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn apply_native_main_window_aspect(
+    _window: &tauri::WebviewWindow,
+    _ratio: Option<f64>,
+) -> Result<(), String> {
+    Ok(())
+}
+
 fn enforce_main_window_aspect(window: &tauri::Window, size: PhysicalSize<u32>) {
+    // macOS, Linux GTK and Windows each receive a native live aspect constraint
+    // from `apply_native_main_window_aspect`. Do not call `set_size` again from
+    // their resize event: that races the user's drag and snaps the window back.
+    if cfg!(any(
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "windows"
+    )) {
+        let state = window.app_handle().state::<MainWindowAspect>();
+        if let Ok(mut last_size) = state.last_size.lock() {
+            *last_size = Some(size);
+        }
+        return;
+    }
     let state = window.app_handle().state::<MainWindowAspect>();
     let ratio = state.ratio.lock().ok().and_then(|value| *value);
     let Some(ratio) = ratio else {

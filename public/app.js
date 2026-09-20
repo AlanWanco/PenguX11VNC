@@ -29,6 +29,7 @@ const requestedTauriScale = (() => {
 })();
 let tauriVncScaleFactor = requestedTauriScale;
 let preferredTauriScale = requestedTauriScale;
+let inheritedTauriScale = requestedTauriScale;
 let localClipboardValue;
 let remoteClipboardValue;
 let hasSavedSettings = false;
@@ -36,8 +37,6 @@ let settingsReady = false;
 let settingsStamp = 0;
 let settingsSaveTimer;
 let settingsSyncTimer;
-let bubbleSaveTimer;
-let bubblePositionDirty = false;
 const defaultSettings = {
   wheel: 25,
   viewOnly: false,
@@ -46,7 +45,6 @@ const defaultSettings = {
   frameRate: 30,
   clipboardSync: false,
   autoChildOpen: true,
-  uiCollapsed: false,
   systemTitlebar: true,
 };
 let settings = { ...defaultSettings };
@@ -72,7 +70,6 @@ function normalizeSettings(value = {}) {
       : 30,
     clipboardSync: value.clipboardSync === true,
     autoChildOpen: value.autoChildOpen !== false,
-    uiCollapsed: value.uiCollapsed === true,
     systemTitlebar: value.systemTitlebar !== false,
   };
 }
@@ -124,9 +121,10 @@ if (settingsChannel) {
     if (event.data?.settings) applySettings(event.data.settings);
     const scale = Number(event.data?.tauriScale);
     if (Number.isFinite(scale) && scale > 0 && scale <= 1) {
+      inheritedTauriScale = scale;
       preferredTauriScale = scale;
       tauriVncResizeKey = undefined;
-      if (connected) geometry();
+      if (connected) geometry(true);
     }
   };
 }
@@ -170,7 +168,6 @@ function syncSettingsControls() {
   setBitrate(settings.bitrate, false);
   setFrameRate(settings.frameRate, false);
   scale(settings.scale, false);
-  setUiCollapsed(settings.uiCollapsed, false);
 }
 function applySettings(value) {
   const previousClipboardSync = settings.clipboardSync;
@@ -204,6 +201,7 @@ function setBitrate(mode, persist = true) {
   if (persist) save();
 }
 function scale(mode, persist = true) {
+  const changed = settings.scale !== mode;
   settings.scale = mode;
   for (const id of ["fit", "actual"]) {
     $(id).classList.toggle("active", id === mode);
@@ -213,88 +211,17 @@ function scale(mode, persist = true) {
     rfb.resizeSession = false;
     rfb.scaleViewport = mode === "fit";
   }
+  if (isTauriShell() && (persist || changed || mode === "actual")) {
+    const inheritedChildScale =
+      !isMainSession && !persist ? inheritedTauriScale : undefined;
+    const forcedScale =
+      inheritedChildScale ?? (mode === "actual" ? 1 : undefined);
+    preferredTauriScale = forcedScale;
+    tauriVncScaleFactor = forcedScale;
+    tauriVncResizeKey = undefined;
+  }
   if (persist) save();
-  geometry();
-}
-let aspectResizeKey;
-function fitCollapsedScreen() {
-  const screen = $("screen");
-  const canvas = screen.querySelector("canvas");
-  if (
-    isTauriShell() ||
-    !document.body.classList.contains("ui-collapsed") ||
-    settings.scale !== "fit" ||
-    !canvas?.width ||
-    !canvas.height
-  ) {
-    for (const property of [
-      "inset",
-      "left",
-      "top",
-      "width",
-      "height",
-      "transform",
-    ])
-      screen.style.removeProperty(property);
-    return;
-  }
-  const gap = 8;
-  const availableWidth = Math.max(1, screen.parentElement.clientWidth - gap);
-  const availableHeight = Math.max(1, screen.parentElement.clientHeight - gap);
-  const aspect = canvas.width / canvas.height;
-  const width = Math.floor(Math.min(availableWidth, availableHeight * aspect));
-  const height = Math.floor(width / aspect);
-  screen.style.inset = "auto";
-  screen.style.left = "50%";
-  screen.style.top = "50%";
-  screen.style.width = `${width}px`;
-  screen.style.height = `${height}px`;
-  screen.style.transform = "translate(-50%, -50%)";
-}
-function resizeWindowToAspect() {
-  const canvas = $("screen").querySelector("canvas");
-  if (
-    isTauriShell() ||
-    !document.body.classList.contains("ui-collapsed") ||
-    settings.scale !== "fit" ||
-    !canvas?.width ||
-    !canvas.height
-  )
-    return;
-  const key = `${canvas.width}x${canvas.height}`;
-  if (aspectResizeKey === key) return;
-  aspectResizeKey = key;
-  const innerWidth = window.innerWidth;
-  const innerHeight = window.innerHeight;
-  const maxInnerHeight = Math.max(
-    450,
-    (window.screen?.availHeight || innerHeight) - 48,
-  );
-  let targetWidth = innerWidth;
-  let targetHeight = Math.round(targetWidth / (canvas.width / canvas.height));
-  if (targetHeight > maxInnerHeight) {
-    targetHeight = maxInnerHeight;
-    targetWidth = Math.round(targetHeight * (canvas.width / canvas.height));
-  }
-  if (
-    Math.abs(targetWidth - innerWidth) < 12 &&
-    Math.abs(targetHeight - innerHeight) < 12
-  )
-    return;
-  try {
-    window.resizeTo(
-      Math.max(
-        520,
-        (window.outerWidth || innerWidth) + targetWidth - innerWidth,
-      ),
-      Math.max(
-        420,
-        (window.outerHeight || innerHeight) + targetHeight - innerHeight,
-      ),
-    );
-  } catch {
-    // Browser app windows may refuse scripted resizing; CSS fitting still applies.
-  }
+  geometry(true);
 }
 let tauriDecorationsState;
 let tauriVncResizeKey;
@@ -304,12 +231,18 @@ function setTitlebarExpanded(expanded, resize = true) {
   document.body.classList.toggle("titlebar-expanded", enabled);
   const toggle = $("titlebar-toggle");
   if (toggle) {
-    toggle.textContent = enabled ? "⌃" : "⋯";
+    toggle.dataset.expanded = String(enabled);
     toggle.title = enabled ? "收起工具栏" : "展开工具栏";
     toggle.setAttribute("aria-label", toggle.title);
     toggle.setAttribute("aria-expanded", String(enabled));
   }
-  if (resize && connected) geometry();
+  if (resize && connected) {
+    // Expanding the custom titlebar changes only the available VNC viewport.
+    // Keep the user's current native window size; do not rebuild it from the
+    // original VNC scale factor.
+    geometry(false);
+    updateTauriAspectForCurrentSize();
+  }
 }
 let tauriVncResizeInFlight = false;
 function currentTauriWindow() {
@@ -329,6 +262,18 @@ function tauriLogicalSize(width, height) {
     ? new LogicalSize(width, height)
     : { type: "Logical", width, height };
 }
+function updateTauriAspectForCurrentSize() {
+  if (!isTauriShell() || !isMainSession || document.fullscreenElement) return;
+  const width = Math.round(window.innerWidth);
+  const height = Math.round(window.innerHeight);
+  if (width <= 0 || height <= 0) return;
+  void tauriInvoke("set_main_window_aspect", { width, height }).catch(
+    (error) => {
+      if (settingsReady)
+        toast(`原生窗口比例锁定失败：${error?.message || error}`);
+    },
+  );
+}
 async function applyTauriTitlebar(decorated, notify = false) {
   const current = currentTauriWindow();
   const supported = isTauriShell() && Boolean(current?.setDecorations);
@@ -340,7 +285,8 @@ async function applyTauriTitlebar(decorated, notify = false) {
     await current.setDecorations(decorated);
     tauriDecorationsState = decorated;
     tauriVncResizeKey = undefined;
-    void resizeTauriWindowToVnc();
+    geometry(false);
+    updateTauriAspectForCurrentSize();
     return true;
   } catch (error) {
     if (notify) toast(`系统标题栏设置失败：${error.message || "权限不足"}`);
@@ -383,7 +329,8 @@ async function resizeTauriWindowToVnc() {
           availableWidth / canvas.width,
           availableHeight / canvas.height,
         );
-  const scaleFactor = preferredTauriScale || autoScaleFactor;
+  const scaleFactor =
+    preferredTauriScale ?? tauriVncScaleFactor ?? autoScaleFactor;
   if (isMainSession) {
     const changed =
       tauriVncScaleFactor === undefined ||
@@ -396,7 +343,7 @@ async function resizeTauriWindowToVnc() {
   const height = Math.max(1, Math.round(canvas.height * scaleFactor));
   const innerWidth = Math.max(1, Math.round(width + chromeWidth));
   const innerHeight = Math.max(1, Math.round(height + chromeHeight));
-  const key = `${canvas.width}x${canvas.height}:${innerWidth}x${innerHeight}:${settings.systemTitlebar}`;
+  const key = `${canvas.width}x${canvas.height}:${innerWidth}x${innerHeight}:${settings.systemTitlebar}:${document.body.classList.contains("titlebar-expanded")}`;
   if (tauriVncResizeKey === key || tauriVncResizeInFlight) return;
   tauriVncResizeKey = key;
   tauriVncResizeInFlight = true;
@@ -405,7 +352,10 @@ async function resizeTauriWindowToVnc() {
       await tauriInvoke("set_main_window_aspect", {
         width: innerWidth,
         height: innerHeight,
-      }).catch(() => {});
+      }).catch((error) => {
+        if (settingsReady)
+          toast(`原生窗口比例锁定失败：${error?.message || error}`);
+      });
     await current.setSize(tauriLogicalSize(innerWidth, innerHeight));
   } catch (error) {
     tauriVncResizeKey = undefined;
@@ -415,7 +365,29 @@ async function resizeTauriWindowToVnc() {
     tauriVncResizeInFlight = false;
   }
 }
-function geometry() {
+function syncMainTauriScaleFromViewport(canvas) {
+  if (!isTauriShell() || !isMainSession || !canvas?.width)
+    return tauriVncScaleFactor;
+  const canvasRect = canvas.getBoundingClientRect();
+  const screenRect = $("screen").getBoundingClientRect();
+  const displayedWidth = Math.min(canvasRect.width, screenRect.width);
+  const displayedHeight = Math.min(canvasRect.height, screenRect.height);
+  const scale = Math.min(
+    displayedWidth / canvas.width,
+    displayedHeight / canvas.height,
+  );
+  if (!Number.isFinite(scale) || scale <= 0) return tauriVncScaleFactor;
+  const normalized = Math.min(1, scale);
+  if (
+    tauriVncScaleFactor !== undefined &&
+    Math.abs(tauriVncScaleFactor - normalized) < 0.002
+  )
+    return tauriVncScaleFactor;
+  tauriVncScaleFactor = normalized;
+  settingsChannel?.postMessage({ tauriScale: normalized });
+  return normalized;
+}
+function geometry(resizeWindow = false) {
   const canvas = $("screen").querySelector("canvas");
   if (!canvas?.width) return;
   const percent = Math.round(
@@ -423,9 +395,8 @@ function geometry() {
   );
   $("geometry").textContent =
     `${canvas.width} × ${canvas.height} · ${percent}% · ${bitrateLabels[settings.bitrate]} · ${frameRateLabels[settings.frameRate]}`;
-  fitCollapsedScreen();
-  resizeWindowToAspect();
-  void resizeTauriWindowToVnc();
+  if (resizeWindow) void resizeTauriWindowToVnc();
+  else syncMainTauriScaleFromViewport(canvas);
   imeOverlay?.position();
 }
 async function api(path, options = {}) {
@@ -534,7 +505,6 @@ async function loadSessionInfo() {
         "clipboard-sync",
         "child-auto-open",
         "system-titlebar",
-        "collapse",
       ])
         $(id).disabled = true;
       $("settings-toggle").title = "子窗口遵循主窗口设置";
@@ -562,161 +532,6 @@ function panel(open) {
   if (open) rfb?.blur();
   else if (connected) rfb?.focus();
 }
-function setUiCollapsed(collapsed, persist = true) {
-  settings.uiCollapsed = collapsed;
-  document.body.classList.toggle("ui-collapsed", collapsed);
-  document.body.classList.remove("ui-peek");
-  clearTimeout(peekTimer);
-  $("collapse").setAttribute("aria-pressed", String(collapsed));
-  if (collapsed) {
-    panel(false);
-    fitCollapsedScreen();
-    resizeWindowToAspect();
-  } else {
-    aspectResizeKey = undefined;
-    fitCollapsedScreen();
-  }
-  if (isMainSession) {
-    try {
-      localStorage.setItem("qq-viewer-ui-collapsed", String(collapsed));
-    } catch {
-      /* optional */
-    }
-  }
-  if (persist) save();
-}
-function restoreUi() {
-  setUiCollapsed(false);
-}
-
-const restoreBubble = $("restore-bubble");
-let bubblePointer;
-let bubbleWasDragged = false;
-function clampBubblePosition(left, top) {
-  const rect = restoreBubble.getBoundingClientRect();
-  const width = rect.width || 42;
-  const height = rect.height || 42;
-  const maxLeft = Math.max(8, window.innerWidth - width - 8);
-  const maxTop = Math.max(8, window.innerHeight - height - 38);
-  return {
-    left: Math.max(8, Math.min(maxLeft, left)),
-    top: Math.max(8, Math.min(maxTop, top)),
-  };
-}
-function applyBubblePosition(value) {
-  if (!Number.isFinite(value?.left) || !Number.isFinite(value?.top)) return;
-  const position = clampBubblePosition(value.left, value.top);
-  restoreBubble.style.left = `${position.left}px`;
-  restoreBubble.style.top = `${position.top}px`;
-  restoreBubble.style.right = "auto";
-  restoreBubble.style.bottom = "auto";
-}
-function currentBubblePosition() {
-  const rect = restoreBubble.getBoundingClientRect();
-  return { left: Math.round(rect.left), top: Math.round(rect.top) };
-}
-function saveBubblePosition() {
-  const position = currentBubblePosition();
-  bubblePositionDirty = true;
-  try {
-    localStorage.setItem(
-      `qq-viewer-bubble-${sessionId}`,
-      JSON.stringify(position),
-    );
-  } catch {
-    /* Storage is optional. */
-  }
-  clearTimeout(bubbleSaveTimer);
-  bubbleSaveTimer = setTimeout(async () => {
-    try {
-      await api(`/api/layout?session=${encodeURIComponent(sessionId)}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ position }),
-      });
-    } catch {
-      // localStorage remains a fallback for the current browser profile.
-    }
-  }, 120);
-}
-async function restoreBubblePosition() {
-  try {
-    const saved = JSON.parse(
-      localStorage.getItem(`qq-viewer-bubble-${sessionId}`) || "null",
-    );
-    applyBubblePosition(saved);
-  } catch {
-    /* Storage is optional. */
-  }
-  try {
-    const response = await api(
-      `/api/layout?session=${encodeURIComponent(sessionId)}`,
-    );
-    if (response.ok && !bubblePositionDirty)
-      applyBubblePosition((await response.json()).position);
-  } catch {
-    // The local fallback is sufficient if the API is unavailable.
-  }
-}
-restoreBubble.addEventListener("pointerdown", (event) => {
-  if (event.button !== 0) return;
-  const rect = restoreBubble.getBoundingClientRect();
-  bubblePointer = {
-    id: event.pointerId,
-    originX: event.clientX,
-    originY: event.clientY,
-    left: rect.left,
-    top: rect.top,
-    moved: false,
-  };
-  restoreBubble.dataset.dragging = "true";
-  restoreBubble.setPointerCapture?.(event.pointerId);
-  event.preventDefault();
-});
-restoreBubble.addEventListener("pointermove", (event) => {
-  if (!bubblePointer || event.pointerId !== bubblePointer.id) return;
-  const dx = event.clientX - bubblePointer.originX;
-  const dy = event.clientY - bubblePointer.originY;
-  if (Math.hypot(dx, dy) > 4) bubblePointer.moved = true;
-  if (!bubblePointer.moved) return;
-  const position = clampBubblePosition(
-    bubblePointer.left + dx,
-    bubblePointer.top + dy,
-  );
-  restoreBubble.style.left = `${position.left}px`;
-  restoreBubble.style.top = `${position.top}px`;
-  restoreBubble.style.right = "auto";
-  restoreBubble.style.bottom = "auto";
-});
-function finishBubblePointer(event) {
-  if (!bubblePointer || event.pointerId !== bubblePointer.id) return;
-  bubbleWasDragged = bubblePointer.moved;
-  if (bubblePointer.moved) saveBubblePosition();
-  restoreBubble.releasePointerCapture?.(event.pointerId);
-  restoreBubble.removeAttribute("data-dragging");
-  bubblePointer = undefined;
-}
-restoreBubble.addEventListener("pointerup", finishBubblePointer);
-restoreBubble.addEventListener("pointercancel", finishBubblePointer);
-restoreBubble.addEventListener("click", (event) => {
-  if (bubbleWasDragged) {
-    bubbleWasDragged = false;
-    event.preventDefault();
-    return;
-  }
-  restoreUi();
-});
-window.addEventListener("resize", () => {
-  fitCollapsedScreen();
-  if (!restoreBubble.style.left) return;
-  const rect = restoreBubble.getBoundingClientRect();
-  const position = clampBubblePosition(rect.left, rect.top);
-  restoreBubble.style.left = `${position.left}px`;
-  restoreBubble.style.top = `${position.top}px`;
-  saveBubblePosition();
-});
-restoreBubblePosition();
-
 function stopClipboardSync() {
   clearInterval(clipboardTimer);
   clipboardTimer = undefined;
@@ -770,14 +585,17 @@ function tauriWebviewWindowClass() {
 function isTauriShell() {
   return typeof tauriWebviewWindowClass() === "function";
 }
-async function createTauriChildWindow(info, url) {
+async function createTauriChildWindow(info, url, scaleFactor = 1) {
   const WebviewWindow = tauriWebviewWindowClass();
   const label = `qq-child-${info.id.replace(/^0x/i, "").toLowerCase()}`;
+  const scale = Number.isFinite(Number(scaleFactor))
+    ? Math.max(0.05, Math.min(1, Number(scaleFactor)))
+    : 1;
   const child = new WebviewWindow(label, {
     url: new URL(url, location.origin).toString(),
     title: `PenguX11VNC · QQ 子窗口 · ${info.id}`,
-    width: Math.max(320, Math.min(1600, info.width)),
-    height: Math.max(240, Math.min(1200, info.height)),
+    width: Math.max(320, Math.min(1600, Math.round(info.width * scale))),
+    height: Math.max(240, Math.min(1200, Math.round(info.height * scale))),
     minWidth: 320,
     minHeight: 200,
     resizable: true,
@@ -851,6 +669,11 @@ async function openChildWindow(info, userInitiated = false) {
     }
   }
   try {
+    const inheritedScale = tauri
+      ? syncMainTauriScaleFromViewport($("screen").querySelector("canvas")) ||
+        tauriVncScaleFactor ||
+        1
+      : 1;
     const opened = await api(
       `/api/windows/${encodeURIComponent(info.id)}/open?session=main`,
       { method: "POST" },
@@ -858,12 +681,13 @@ async function openChildWindow(info, userInitiated = false) {
     if (!opened.ok) throw new Error("子窗口 VNC 会话启动失败");
     const data = await opened.json();
     let childUrl = data.url;
-    if (tauri && Number.isFinite(tauriVncScaleFactor)) {
+    if (tauri && Number.isFinite(inheritedScale)) {
       const url = new URL(data.url, location.origin);
-      url.searchParams.set("vncScale", tauriVncScaleFactor.toFixed(6));
+      url.searchParams.set("vncScale", inheritedScale.toFixed(6));
       childUrl = url.toString();
     }
-    if (tauri) child = await createTauriChildWindow(info, childUrl);
+    if (tauri)
+      child = await createTauriChildWindow(info, childUrl, inheritedScale);
     else child.location.href = childUrl;
     const entry = {
       window: child,
@@ -1075,14 +899,14 @@ async function connect(prepare = true) {
       setInteractive();
       startClipboardSync();
       const canvas = $("screen").querySelector("canvas");
-      resizeObserver = new ResizeObserver(geometry);
+      resizeObserver = new ResizeObserver(() => geometry(false));
       resizeObserver.observe(canvas);
-      frameObserver = new MutationObserver(geometry);
+      frameObserver = new MutationObserver(() => geometry(true));
       frameObserver.observe(canvas, {
         attributes: true,
         attributeFilter: ["width", "height"],
       });
-      geometry();
+      geometry(true);
       startChildMonitor();
       if ($("settings").hidden) client.focus();
     });
@@ -1095,6 +919,11 @@ async function connect(prepare = true) {
       resizeObserver?.disconnect();
       frameObserver?.disconnect();
       tauriVncResizeKey = undefined;
+      const resetScale = isMainSession
+        ? requestedTauriScale
+        : (inheritedTauriScale ?? requestedTauriScale);
+      tauriVncScaleFactor = resetScale;
+      preferredTauriScale = resetScale;
       if (isMainSession && isTauriShell())
         void tauriInvoke("set_main_window_aspect", { width: 0, height: 0 });
       document.body.classList.remove("tauri-vnc-frame");
@@ -1255,6 +1084,7 @@ $("system-titlebar").addEventListener("change", async () => {
     $("system-titlebar").checked = !enabled;
   }
 });
+document.body.classList.toggle("tauri-shell", isTauriShell());
 if (isTauriShell() && isMainSession) {
   const trayName = /Mac/.test(navigator.platform) ? "菜单栏" : "系统托盘";
   $("window-close").title = `隐藏到${trayName}`;
@@ -1315,25 +1145,6 @@ document.addEventListener("pointerdown", (event) => {
   )
     panel(false);
 });
-$("collapse").addEventListener("click", () => setUiCollapsed(true));
-let peekTimer;
-function schedulePeekHide() {
-  clearTimeout(peekTimer);
-  if (
-    !document.body.classList.contains("ui-collapsed") ||
-    !document.body.classList.contains("ui-peek")
-  )
-    return;
-  peekTimer = setTimeout(() => {
-    document.body.classList.remove("ui-peek");
-    peekTimer = undefined;
-  }, 900);
-}
-document.addEventListener("mousemove", (event) => {
-  if (!document.body.classList.contains("ui-collapsed")) return;
-  if (event.clientY <= 16) document.body.classList.add("ui-peek");
-  schedulePeekHide();
-});
 $("fullscreen").addEventListener("click", async () => {
   try {
     if (document.fullscreenElement) await document.exitFullscreen();
@@ -1347,10 +1158,11 @@ document.addEventListener("fullscreenchange", () => {
     "immersive",
     Boolean(document.fullscreenElement),
   );
-  if (connected) geometry();
+  if (connected) geometry(true);
 });
 window.addEventListener("resize", () => {
-  if (connected) geometry();
+  if (!connected) return;
+  geometry(false);
 });
 $("password-form").addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -1399,20 +1211,6 @@ window.addEventListener("pagehide", () => {
   stopClipboardSync();
   stopChildMonitor();
   clearTimeout(settingsSyncTimer);
-  if (bubblePositionDirty && token) {
-    clearTimeout(bubbleSaveTimer);
-    fetch(
-      `/api/layout?session=${encodeURIComponent(sessionId)}&token=${encodeURIComponent(token)}`,
-      {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ position: currentBubblePosition() }),
-        keepalive: true,
-      },
-    ).catch(() => {});
-  } else {
-    clearTimeout(bubbleSaveTimer);
-  }
   if (isMainSession && settingsReady && token) {
     clearTimeout(settingsSaveTimer);
     fetch(`/api/settings?session=main&token=${encodeURIComponent(token)}`, {
@@ -1432,14 +1230,5 @@ window.addEventListener("pagehide", () => {
     ).catch(() => {});
   }
 });
-try {
-  if (
-    settings.uiCollapsed ||
-    (isMainSession && localStorage.getItem("qq-viewer-ui-collapsed") === "true")
-  )
-    setUiCollapsed(true, false);
-} catch {
-  /* optional */
-}
 sessionReady = loadSessionInfo();
 scale(settings.scale, false);

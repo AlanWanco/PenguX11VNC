@@ -63,7 +63,6 @@ function normalizeViewerSettings(value = {}) {
       : 30,
     clipboardSync: value.clipboardSync === true,
     autoChildOpen: value.autoChildOpen !== false,
-    uiCollapsed: value.uiCollapsed === true,
     systemTitlebar: value.systemTitlebar !== false,
   };
 }

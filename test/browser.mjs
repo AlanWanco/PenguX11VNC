@@ -196,48 +196,8 @@ try {
     "Frame rate change stalled updates",
   );
   await page.click("#settings-close");
-  await page.click("#collapse");
-  assert.equal(
-    await page
-      .locator("footer")
-      .boundingBox()
-      .then((box) => box.height),
-    30,
-  );
-  assert.equal(await page.locator("#restore-bubble").isVisible(), true);
-  await page.mouse.move(20, 4);
-  await page.waitForTimeout(1100);
-  assert.equal(
-    await page
-      .locator("body")
-      .evaluate((node) => node.classList.contains("ui-peek")),
-    false,
-    "Peek UI did not auto-collapse",
-  );
-  const bubble = await page.locator("#restore-bubble").boundingBox();
-  await page.mouse.move(
-    bubble.x + bubble.width / 2,
-    bubble.y + bubble.height / 2,
-  );
-  await page.mouse.down();
-  await page.mouse.move(
-    bubble.x + bubble.width / 2 + 40,
-    bubble.y + bubble.height / 2 + 20,
-  );
-  await page.mouse.up();
-  assert.equal(
-    await page
-      .locator("body")
-      .evaluate((node) => node.classList.contains("ui-collapsed")),
-    true,
-  );
-  await page.locator("#restore-bubble").click();
-  assert.equal(
-    await page
-      .locator("body")
-      .evaluate((node) => node.classList.contains("ui-collapsed")),
-    false,
-  );
+  assert.equal(await page.locator("#collapse").count(), 0);
+  assert.equal(await page.locator("#restore-bubble").count(), 0);
   await page.click("#settings-toggle");
   await page.screenshot({ path: ".runtime/settings.png" });
   await page.click("#disconnect");
