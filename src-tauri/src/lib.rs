@@ -1,4 +1,5 @@
 mod manager;
+mod tray;
 
 use manager::{hidden_command, startup_profile, ManagerRuntime, Profile};
 use serde_json::json;
@@ -12,7 +13,7 @@ use std::sync::{
 };
 use std::thread;
 use std::time::Duration;
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+use tauri::{AppHandle, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use url::Url;
 
 struct RuntimeState {
@@ -232,20 +233,39 @@ pub fn run() {
                 }
                 return Err(error.into());
             }
+            if tray::install(app.handle()).is_err() {
+                // A tray failure must not leave an invisible, unrecoverable app.
+                // Keep the main window and its normal close/exit behavior.
+                eprintln!("系统托盘不可用：主窗口将使用正常关闭行为");
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
+            if window.label() == "main" {
+                match event {
+                    WindowEvent::CloseRequested { api, .. }
+                        if tray::close_action(window.app_handle(), "main")
+                            == tray::CloseAction::HideMain =>
+                    {
+                        api.prevent_close();
+                        if tray::hide_main(window.app_handle()).is_err() {
+                            eprintln!("无法隐藏主窗口，已保留窗口以便重试");
+                        }
+                    }
+                    WindowEvent::ThemeChanged(_) => tray::refresh_theme(window.app_handle()),
+                    WindowEvent::Destroyed => {
+                        tray::shutdown(window.app_handle());
+                        window.app_handle().exit(0);
+                    }
+                    _ => {}
+                }
+                return;
+            }
             let closing = matches!(
                 event,
                 WindowEvent::CloseRequested { .. } | WindowEvent::Destroyed
             );
             if !closing {
-                return;
-            }
-            if window.label() == "main" {
-                if let Some(state) = window.app_handle().try_state::<RuntimeState>() {
-                    state.stop();
-                }
                 return;
             }
             let Some(window_id) = window.label().strip_prefix("qq-child-") else {
@@ -260,6 +280,23 @@ pub fn run() {
                 }
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running PenguX11VNC");
+        .build(tauri::generate_context!())
+        .expect("error while building PenguX11VNC")
+        .run(|app, event| match event {
+            // Explicit tray Quit, macOS Cmd+Q, and OS exit all use the same cleanup.
+            // Hiding the main window never reaches this branch. If no tray is
+            // available, ordinary main-window close still exits and cleans up.
+            RunEvent::Exit => {
+                tray::shutdown(app);
+                if let Some(state) = app.try_state::<RuntimeState>() {
+                    state.stop();
+                }
+            }
+            RunEvent::ExitRequested { .. } => tray::shutdown(app),
+            #[cfg(target_os = "macos")]
+            RunEvent::Reopen { .. } => {
+                let _ = tray::restore_main(app);
+            }
+            _ => {}
+        });
 }

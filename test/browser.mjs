@@ -34,6 +34,12 @@ try {
   await page.waitForTimeout(300);
   assert.deepEqual(errors, []);
   assert.equal(new URL(page.url()).hash, "");
+  assert.equal(await page.locator("#tauri-close-hint").isHidden(), true);
+  assert.equal(
+    await page.locator("#window-close").getAttribute("aria-label"),
+    "关闭窗口",
+    "Chrome fallback must not advertise native tray behavior",
+  );
   await mkdir(".runtime", { recursive: true, mode: 0o700 });
   await page.screenshot({ path: ".runtime/welcome.png" });
   await page.click("#connect");

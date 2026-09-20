@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="8 9 32 32">
+  <!-- Monochrome speech bubble from public/icon.svg, without the purple tile. -->
+  <g fill="#000" stroke="#000">
+    <path d="M13 14h22v16H25l-7 6v-6h-5V14Z" fill="none" stroke-width="2.6" stroke-linejoin="round"/>
+    <circle cx="20" cy="22" r="1.6" stroke="none"/>
+    <circle cx="28" cy="22" r="1.6" stroke="none"/>
+  </g>
+</svg>

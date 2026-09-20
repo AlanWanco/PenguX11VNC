@@ -157,6 +157,18 @@ export async function testTauriChildren(browser, app) {
       () => document.querySelector("#status").textContent === "已连接",
     );
     await page.waitForFunction(() => window.tauriFixture.sizeCalls.length > 0);
+    assert.match(
+      await page.locator("#window-close").getAttribute("aria-label"),
+      /隐藏到(菜单栏|系统托盘)/,
+      "Main-window close must explain the native tray behavior",
+    );
+    await page.click("#settings-toggle");
+    assert.match(
+      await page.locator("#tauri-close-hint").textContent(),
+      /连接继续保持/,
+    );
+    assert.equal(await page.locator("#tauri-close-hint").isVisible(), true);
+    await page.click("#settings-close");
     const fitted = await page.evaluate(() => {
       const size = window.tauriFixture.sizeCalls.at(-1);
       const canvas = document.querySelector("canvas");

@@ -1198,6 +1198,14 @@ $("system-titlebar").addEventListener("change", async () => {
     $("system-titlebar").checked = !enabled;
   }
 });
+if (isTauriShell() && isMainSession) {
+  const trayName = /Mac/.test(navigator.platform) ? "菜单栏" : "系统托盘";
+  $("window-close").title = `隐藏到${trayName}`;
+  $("window-close").setAttribute("aria-label", `隐藏到${trayName}`);
+  $("tauri-close-hint").textContent =
+    `${trayName}可用时，关闭主窗口只会隐藏，连接继续保持；从图标菜单恢复或退出。QQ 子窗口仍正常关闭。`;
+  $("tauri-close-hint").hidden = false;
+}
 $("window-close").addEventListener("click", () => {
   currentTauriWindow()
     ?.close()
