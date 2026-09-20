@@ -327,7 +327,7 @@ def probe(options: dict) -> dict:
         "windowScanComplete": accessible == len(displays),
         "x11vnc": bool(shutil.which("x11vnc")),
         "windows": windows[:32],
-        "passwordFile": password_file,
+        "passwordFile": str(password_file),
         "passwordReady": valid_password_file(password_file),
         "helpers": {
             "windowList": str(helper / "list-qq-windows"),
