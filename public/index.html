@@ -226,9 +226,16 @@
       <form id="password-form">
         <span class="eyebrow">PRIVATE CONNECTION</span>
         <h2>连接密码</h2>
-        <p>输入当前 VNC 密码。密码不会保存到浏览器。</p>
+        <p>输入当前 VNC 密码。默认使用本机系统凭据库记住，不写入配置文件。</p>
         <label for="password">VNC 密码</label
         ><input id="password" type="password" autocomplete="off" required />
+        <label class="password-remember"
+          ><input
+            id="password-remember"
+            type="checkbox"
+            checked
+          />在本机系统凭据库中记住此连接密码</label
+        >
         <div class="dialog-actions">
           <button id="password-cancel" type="button">取消</button
           ><button class="primary" type="submit">连接</button>

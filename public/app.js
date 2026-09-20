@@ -303,6 +303,7 @@ async function cacheVncPassword(password) {
     body: JSON.stringify({ password }),
   });
   if (!response.ok) throw new Error("本次运行无法缓存 VNC 密码");
+  return response.json().catch(() => ({}));
 }
 async function clearVncPasswordCache() {
   try {
@@ -654,6 +655,15 @@ async function createTauriChildWindow(info, url) {
   });
   return child;
 }
+async function cleanupChildEntry(key, entry) {
+  if (!entry || entry.cleanupStarted) return;
+  entry.cleanupStarted = true;
+  window.openedChildWindows?.delete(key);
+  await api(
+    `/api/sessions/${encodeURIComponent(entry.sessionId)}?session=main`,
+    { method: "DELETE" },
+  ).catch(() => {});
+}
 function renderChildWindows(windows) {
   const list = $("child-list");
   list.replaceChildren();
@@ -703,10 +713,15 @@ async function openChildWindow(info, userInitiated = false) {
       sessionId: data.session.id,
       info,
     };
-    if (tauri)
-      child.once("tauri://destroyed", () => {
+    if (tauri) {
+      const markClosed = () => {
         entry.closed = true;
-      });
+        void cleanupChildEntry(key, entry);
+      };
+      child.once("tauri://destroyed", markClosed);
+      if (typeof child.onCloseRequested === "function")
+        child.onCloseRequested(markClosed).catch(() => {});
+    }
     window.openedChildWindows.set(key, entry);
     renderChildWindows(window.lastChildWindows || []);
   } catch (error) {
@@ -742,7 +757,6 @@ async function pollChildWindows(force = false) {
         (!entry.tauri && entry.window?.closed === true);
       const remoteClosed = !visibleKeys.has(key);
       if (!childClosed && !remoteClosed) continue;
-      window.openedChildWindows.delete(key);
       if (remoteClosed && !childClosed) {
         try {
           entry.window.close();
@@ -750,10 +764,7 @@ async function pollChildWindows(force = false) {
           // The native/browser child may already be closing.
         }
       }
-      await api(
-        `/api/sessions/${encodeURIComponent(entry.sessionId)}?session=main`,
-        { method: "DELETE" },
-      ).catch(() => {});
+      await cleanupChildEntry(key, entry);
     }
     $("child-status").textContent = windows.length
       ? `发现 ${windows.length} 个 QQ 子窗口。`
@@ -1092,7 +1103,9 @@ $("password-form").addEventListener("submit", async (event) => {
   const client = rfb;
   if (password) {
     try {
-      await cacheVncPassword(password);
+      const result = await cacheVncPassword(password);
+      if ($("password-remember").checked && result.persisted === false)
+        toast("系统凭据库不可用；本次运行仍会复用密码，但重启后需重新输入。");
     } catch {
       // Still authenticate this connection if the optional cache is unavailable.
     }

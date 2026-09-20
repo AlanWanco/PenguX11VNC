@@ -567,6 +567,17 @@ dialog p {
 dialog label {
   font-size: 11px;
 }
+.password-remember {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  line-height: 1.6;
+  margin: 2px 0 14px;
+}
+.password-remember input {
+  flex: none;
+  margin-top: 2px;
+}
 .dialog-actions {
   display: flex;
   justify-content: flex-end;

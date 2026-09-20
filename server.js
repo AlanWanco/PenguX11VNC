@@ -362,7 +362,9 @@ export async function startServer({
   }
   function getSession(id = "main") {
     if (!validSessionId(id)) return undefined;
-    return sessions.get(id);
+    const session = sessions.get(id);
+    if (session) session.lastSeen = Date.now();
+    return session;
   }
   function publicSession(session) {
     return {
@@ -513,7 +515,8 @@ export async function startServer({
   }
 
   async function cleanupSession(session) {
-    if (!session || session.id === "main") return;
+    if (!session || session.id === "main" || !childProcesses.has(session.id))
+      return;
     sessions.delete(session.id);
     childProcesses.delete(session.id);
     if (rustManager) {
@@ -527,6 +530,13 @@ export async function startServer({
     if (session.remotePid)
       await runSsh(profile, `kill ${session.remotePid}`, 5000).catch(() => {});
   }
+  const sessionSweep = setInterval(() => {
+    const cutoff = Date.now() - 10000;
+    for (const session of childProcesses.values()) {
+      if (session.lastSeen < cutoff) void cleanupSession(session);
+    }
+  }, 2000);
+  sessionSweep.unref?.();
 
   const server = http.createServer(async (req, res) => {
     res.setHeader("Content-Security-Policy", csp);
@@ -592,7 +602,13 @@ export async function startServer({
         if (data.profile) {
           profile = normalizeConnection(data.profile, data.profile.id);
           passwordFile = undefined;
-          cachedVncPassword = undefined;
+          if (url.pathname === "/api/setup/save") {
+            cachedVncPassword = undefined;
+            if (rustManager)
+              await managerRequest(rustManager, "/credentials", {
+                method: "DELETE",
+              }).catch(() => {});
+          }
         }
         const main = getSession("main");
         if (data.state === "ready") {
@@ -637,6 +653,10 @@ export async function startServer({
         if (!session) return json(res, 404, { error: "session-not-found" });
         if (req.method === "DELETE") {
           cachedVncPassword = undefined;
+          if (rustManager)
+            await managerRequest(rustManager, "/credentials", {
+              method: "DELETE",
+            }).catch(() => {});
           return json(res, 200, { ok: true });
         }
         if (req.method !== "POST")
@@ -651,7 +671,23 @@ export async function startServer({
         )
           return json(res, 400, { error: "invalid-vnc-password" });
         cachedVncPassword = password;
-        return json(res, 200, { ok: true });
+        let persisted = false;
+        if (rustManager) {
+          try {
+            const result = await managerRequest(rustManager, "/credentials", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                password,
+                persist: body.persist !== false,
+              }),
+            });
+            persisted = result.persisted === true;
+          } catch {
+            // The memory cache still serves this run if the OS vault is unavailable.
+          }
+        }
+        return json(res, 200, { ok: true, persisted });
       }
       if (url.pathname === "/api/credentials") {
         const session = getSession(sessionId);
@@ -661,6 +697,19 @@ export async function startServer({
           password = await readVncPassword(
             passwordFile || profile.vnc.passwordFile,
           );
+        if (
+          password === undefined &&
+          cachedVncPassword === undefined &&
+          rustManager
+        ) {
+          try {
+            const stored = await managerRequest(rustManager, "/credentials");
+            if (typeof stored.password === "string" && stored.password)
+              cachedVncPassword = stored.password;
+          } catch {
+            // No OS credential is available; prompt once for this run.
+          }
+        }
         if (password === undefined) password = cachedVncPassword;
         return json(res, 200, password === undefined ? {} : { password });
       }
@@ -844,6 +893,7 @@ export async function startServer({
     token,
     url: `${origin}/#token=${token}`,
     async close() {
+      clearInterval(sessionSweep);
       for (const session of childProcesses.values())
         await cleanupSession(session);
       for (const ws of wss.clients) ws.terminate();

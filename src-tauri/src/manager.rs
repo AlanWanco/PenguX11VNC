@@ -20,6 +20,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 const DEFAULT_CONFIG: &str = ".config/qq-window-viewer/connections.json";
+const VNC_CREDENTIAL_SERVICE: &str = "com.alanwanco.PenguX11VNC";
 
 pub(crate) fn hidden_command<S: AsRef<OsStr>>(program: S) -> Command {
     #[cfg(windows)]
@@ -238,6 +239,26 @@ impl ManagerState {
             profile,
             children: HashMap::new(),
             onboarding: Onboarding::new(configured, startup_error),
+        }
+    }
+
+    fn credential_entry(&self) -> Result<keyring::Entry, keyring::Error> {
+        keyring::Entry::new(VNC_CREDENTIAL_SERVICE, &format!("vnc:{}", self.profile.id))
+    }
+
+    fn stored_vnc_password(&self) -> Option<String> {
+        self.credential_entry().ok()?.get_password().ok()
+    }
+
+    fn store_vnc_password(&self, password: &str) -> bool {
+        self.credential_entry()
+            .and_then(|entry| entry.set_password(password))
+            .is_ok()
+    }
+
+    fn clear_vnc_password(&self) {
+        if let Ok(entry) = self.credential_entry() {
+            let _ = entry.delete_credential();
         }
     }
 
@@ -939,6 +960,32 @@ fn handle_request(mut stream: TcpStream, state: Arc<Mutex<ManagerState>>, token:
                 json!({"ok": true})
             }),
         ("GET", "/status") => Ok(json!({"ok": true})),
+        ("GET", "/credentials") => state
+            .lock()
+            .map_err(|_| io::Error::other("manager locked"))
+            .map(|manager| {
+                manager
+                    .stored_vnc_password()
+                    .map_or_else(|| json!({}), |password| json!({"password": password}))
+            }),
+        ("POST", "/credentials") => state
+            .lock()
+            .map_err(|_| io::Error::other("manager locked"))
+            .map(|manager| {
+                if body["persist"] == false {
+                    manager.clear_vnc_password();
+                    return json!({"ok": true, "persisted": false});
+                }
+                let password = body["password"].as_str().unwrap_or_default();
+                json!({"ok": true, "persisted": manager.store_vnc_password(password)})
+            }),
+        ("DELETE", "/credentials") => state
+            .lock()
+            .map_err(|_| io::Error::other("manager locked"))
+            .map(|manager| {
+                manager.clear_vnc_password();
+                json!({"ok": true})
+            }),
         ("GET", "/windows") => state
             .lock()
             .map_err(|_| io::Error::other("manager locked"))
