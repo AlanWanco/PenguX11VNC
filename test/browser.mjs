@@ -49,6 +49,11 @@ try {
   await page.waitForFunction(
     () => document.querySelector("canvas")?.width === 1669,
   );
+  assert.equal(
+    await page.locator("#send-clipboard-files").isDisabled(),
+    true,
+    "Chrome fallback must not claim native file clipboard support",
+  );
   assert(
     !mock.events.encodings.includes(7),
     "Tight/JPEG must not be advertised",

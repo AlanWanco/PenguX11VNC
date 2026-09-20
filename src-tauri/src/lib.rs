@@ -1,8 +1,12 @@
 mod manager;
 mod tray;
 
-use manager::{hidden_command, startup_profile, ManagerRuntime, Profile};
+use manager::{
+    hidden_command, startup_profile, ClipboardUploadResult, ManagerRuntime, Profile,
+    CLIPBOARD_FILE_LIMIT,
+};
 use serde_json::json;
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -13,13 +17,193 @@ use std::sync::{
 };
 use std::thread;
 use std::time::Duration;
-use tauri::{AppHandle, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+use tauri::{
+    AppHandle, Manager, PhysicalSize, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent,
+};
 use url::Url;
 
 struct RuntimeState {
     manager: Mutex<Option<ManagerRuntime>>,
     node: Mutex<Option<Child>>,
     stopped: AtomicBool,
+}
+
+#[derive(Default)]
+struct MainWindowAspect {
+    ratio: Mutex<Option<f64>>,
+    last_size: Mutex<Option<PhysicalSize<u32>>>,
+    correcting: AtomicBool,
+}
+
+#[derive(serde::Serialize)]
+struct ClipboardFilePreview {
+    path: String,
+    name: String,
+    size: u64,
+}
+
+#[tauri::command]
+fn set_main_window_aspect(app: AppHandle, width: f64, height: f64) -> Result<(), String> {
+    let state = app.state::<MainWindowAspect>();
+    let mut ratio = state
+        .ratio
+        .lock()
+        .map_err(|_| "窗口比例状态不可用".to_string())?;
+    if width <= 0.0 || height <= 0.0 || !width.is_finite() || !height.is_finite() {
+        *ratio = None;
+        if let Ok(mut last_size) = state.last_size.lock() {
+            *last_size = None;
+        }
+        return Ok(());
+    }
+    let value = width / height;
+    if !(0.05..=20.0).contains(&value) || !value.is_finite() {
+        return Err("窗口比例无效".to_string());
+    }
+    *ratio = Some(value);
+    if let Some(window) = app.get_webview_window("main") {
+        if let Ok(size) = window.inner_size() {
+            if let Ok(mut last_size) = state.last_size.lock() {
+                *last_size = Some(size);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn read_local_clipboard_paths() -> Result<Vec<std::path::PathBuf>, String> {
+    let mut clipboard =
+        arboard::Clipboard::new().map_err(|error| format!("无法读取本机剪贴板：{error}"))?;
+    clipboard
+        .get()
+        .file_list()
+        .map_err(|error| format!("本机剪贴板中没有可用文件：{error}"))
+}
+
+fn clipboard_file_signature(
+    files: &[manager::LocalClipboardFile],
+) -> Result<HashMap<std::path::PathBuf, (String, u64)>, String> {
+    let signature = files
+        .iter()
+        .map(|file| (file.path.clone(), (file.name.clone(), file.size)))
+        .collect::<HashMap<_, _>>();
+    if signature.len() != files.len() {
+        return Err("剪贴板中包含重复文件，已阻止重复上传".to_string());
+    }
+    Ok(signature)
+}
+
+#[tauri::command]
+fn read_clipboard_files() -> Result<Vec<ClipboardFilePreview>, String> {
+    let paths = read_local_clipboard_paths()?;
+    let files = manager::validate_clipboard_files(&paths)
+        .map_err(|error| format!("剪贴板文件不可用：{error}"))?;
+    let total: u64 = files.iter().map(|file| file.size).sum();
+    if total > CLIPBOARD_FILE_LIMIT {
+        return Err(format!(
+            "剪贴板文件合计超过 50 MiB（当前 {} MiB）",
+            (total as f64 / 1024.0 / 1024.0).ceil() as u64
+        ));
+    }
+    Ok(files
+        .into_iter()
+        .map(|file| ClipboardFilePreview {
+            path: file.path.to_string_lossy().into_owned(),
+            name: file.name,
+            size: file.size,
+        })
+        .collect())
+}
+
+#[tauri::command]
+async fn upload_clipboard_files(
+    app: AppHandle,
+    paths: Vec<String>,
+) -> Result<ClipboardUploadResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let paths = paths
+            .into_iter()
+            .map(std::path::PathBuf::from)
+            .collect::<Vec<_>>();
+        let requested = manager::validate_clipboard_files(&paths)
+            .map_err(|error| format!("剪贴板文件不可用：{error}"))?;
+        let current = manager::validate_clipboard_files(&read_local_clipboard_paths()?)
+            .map_err(|error| format!("剪贴板文件已变化：{error}"))?;
+        if clipboard_file_signature(&requested)? != clipboard_file_signature(&current)? {
+            return Err("本机文件剪贴板已变化，请重新点击上传".to_string());
+        }
+        let state = app
+            .try_state::<RuntimeState>()
+            .ok_or_else(|| "本地连接管理器尚未启动".to_string())?;
+        let manager = state
+            .manager
+            .lock()
+            .map_err(|_| "连接管理器不可用".to_string())?;
+        let manager = manager
+            .as_ref()
+            .ok_or_else(|| "连接管理器已停止".to_string())?;
+        manager
+            .upload_clipboard_files(paths)
+            .map_err(|error| format!("文件上传失败：{error}"))
+    })
+    .await
+    .map_err(|error| format!("文件上传任务失败：{error}"))?
+}
+
+fn corrected_main_window_size(
+    size: PhysicalSize<u32>,
+    previous: PhysicalSize<u32>,
+    ratio: f64,
+) -> PhysicalSize<u32> {
+    let width_delta = size.width.abs_diff(previous.width);
+    let height_delta = size.height.abs_diff(previous.height);
+    if width_delta >= height_delta {
+        let minimum_width = (200.0 * ratio).ceil() as u32;
+        let width = size.width.max(320).max(minimum_width);
+        PhysicalSize::new(width, (f64::from(width) / ratio).round().max(200.0) as u32)
+    } else {
+        let minimum_height = (320.0 / ratio).ceil() as u32;
+        let height = size.height.max(200).max(minimum_height);
+        PhysicalSize::new(
+            (f64::from(height) * ratio).round().max(320.0) as u32,
+            height,
+        )
+    }
+}
+
+fn enforce_main_window_aspect(window: &tauri::Window, size: PhysicalSize<u32>) {
+    let state = window.app_handle().state::<MainWindowAspect>();
+    let ratio = state.ratio.lock().ok().and_then(|value| *value);
+    let Some(ratio) = ratio else {
+        if let Ok(mut last_size) = state.last_size.lock() {
+            *last_size = Some(size);
+        }
+        return;
+    };
+    if state.correcting.swap(true, Ordering::AcqRel) {
+        if let Ok(mut last_size) = state.last_size.lock() {
+            *last_size = Some(size);
+        }
+        return;
+    }
+    let previous = state.last_size.lock().ok().and_then(|value| *value);
+    let Some(previous) = previous else {
+        if let Ok(mut last_size) = state.last_size.lock() {
+            *last_size = Some(size);
+        }
+        state.correcting.store(false, Ordering::Release);
+        return;
+    };
+    let target = corrected_main_window_size(size, previous, ratio);
+    if target != size {
+        let _ = window.set_size(target);
+        if let Ok(mut last_size) = state.last_size.lock() {
+            *last_size = Some(target);
+        }
+    } else if let Ok(mut last_size) = state.last_size.lock() {
+        *last_size = Some(size);
+    }
+    state.correcting.store(false, Ordering::Release);
 }
 
 impl RuntimeState {
@@ -192,6 +376,12 @@ fn start_node(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(MainWindowAspect::default())
+        .invoke_handler(tauri::generate_handler![
+            set_main_window_aspect,
+            read_clipboard_files,
+            upload_clipboard_files
+        ])
         .setup(|app| {
             let root = bridge_root(app.handle())?;
             let (profile, configured, startup_error) = startup_profile();
@@ -252,6 +442,7 @@ pub fn run() {
                             eprintln!("无法隐藏主窗口，已保留窗口以便重试");
                         }
                     }
+                    WindowEvent::Resized(size) => enforce_main_window_aspect(window, *size),
                     WindowEvent::ThemeChanged(_) => tray::refresh_theme(window.app_handle()),
                     WindowEvent::Destroyed => {
                         tray::shutdown(window.app_handle());
@@ -299,4 +490,26 @@ pub fn run() {
             }
             _ => {}
         });
+}
+
+#[cfg(test)]
+mod aspect_tests {
+    use super::*;
+
+    #[test]
+    fn aspect_correction_follows_the_larger_resize_axis() {
+        let width_resize = corrected_main_window_size(
+            PhysicalSize::new(1400, 800),
+            PhysicalSize::new(1200, 800),
+            1.5,
+        );
+        assert_eq!(width_resize, PhysicalSize::new(1400, 933));
+
+        let height_resize = corrected_main_window_size(
+            PhysicalSize::new(1000, 900),
+            PhysicalSize::new(1000, 700),
+            1.5,
+        );
+        assert_eq!(height_resize, PhysicalSize::new(1350, 900));
+    }
 }

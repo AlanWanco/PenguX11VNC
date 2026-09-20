@@ -33,6 +33,8 @@
 - [ ] 系统密钥环/Keychain/Credential Manager/libsecret 保存 VNC 密码和私钥口令引用
 - [x] 原生多窗口：Tauri 页面使用 WebviewWindow 创建 QQ 子窗口；Chrome 回退仍使用 window.open()
 - [x] WebView 承载 noVNC 画布；复用现有 `public/qq-rfb.js` 和 UI
+- [x] 主窗口根据 VNC 画面与 UI 外框原生锁定长宽比
+- [x] Tauri 显式文件剪贴板上传：50 MiB 限制、SCP、远端 Downloads 与 `text/uri-list`
 
 - [x] GitHub Actions 未签名调试打包：macOS arm64 DMG、Linux amd64/arm64 AppImage、Windows amd64/arm64 NSIS 安装包
 - [ ] Release 签名、自动更新与版本回滚

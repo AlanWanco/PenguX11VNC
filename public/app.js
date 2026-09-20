@@ -315,6 +315,12 @@ let tauriVncResizeInFlight = false;
 function currentTauriWindow() {
   return globalThis.__TAURI__?.window?.getCurrentWindow?.();
 }
+function tauriInvoke(command, args) {
+  const invoke = globalThis.__TAURI__?.core?.invoke;
+  if (typeof invoke !== "function")
+    return Promise.reject(new Error("Tauri 命令不可用"));
+  return invoke(command, args);
+}
 function tauriLogicalSize(width, height) {
   const LogicalSize =
     globalThis.__TAURI__?.window?.LogicalSize ||
@@ -353,6 +359,8 @@ async function resizeTauriWindowToVnc() {
   ) {
     document.body.classList.remove("tauri-vnc-frame");
     tauriVncResizeKey = undefined;
+    if (isMainSession && isTauriShell())
+      void tauriInvoke("set_main_window_aspect", { width: 0, height: 0 });
     return;
   }
   document.body.classList.add("tauri-vnc-frame");
@@ -393,6 +401,11 @@ async function resizeTauriWindowToVnc() {
   tauriVncResizeKey = key;
   tauriVncResizeInFlight = true;
   try {
+    if (isMainSession)
+      await tauriInvoke("set_main_window_aspect", {
+        width: innerWidth,
+        height: innerHeight,
+      }).catch(() => {});
     await current.setSize(tauriLogicalSize(innerWidth, innerHeight));
   } catch (error) {
     tauriVncResizeKey = undefined;
@@ -941,9 +954,51 @@ function stopChildMonitor() {
   childPollInFlight = false;
 }
 
+function formatFileSize(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MiB`;
+}
+async function sendClipboardFiles() {
+  const status = $("clipboard-files-status");
+  try {
+    const files = await tauriInvoke("read_clipboard_files");
+    if (!Array.isArray(files) || files.length === 0) {
+      status.textContent = "本机剪贴板中没有文件。";
+      return;
+    }
+    const total = files.reduce((sum, file) => sum + Number(file.size || 0), 0);
+    const summary = files
+      .map(
+        (file) => `${file.name}（${formatFileSize(Number(file.size) || 0)}）`,
+      )
+      .join("、");
+    if (
+      !window.confirm(
+        `将 ${files.length} 个文件（${formatFileSize(total)}）上传到远端 Downloads？\n\n${summary}\n\n上传后远端 Linux 剪贴板会包含这些文件；不会自动发送 QQ 消息。`,
+      )
+    )
+      return;
+    status.textContent = `正在上传 ${files.length} 个文件（${formatFileSize(total)}），请稍候……`;
+    const result = await tauriInvoke("upload_clipboard_files", {
+      paths: files.map((file) => file.path),
+    });
+    const names = result.files?.map((file) => file.name).join("、") || summary;
+    status.textContent = `已上传到远端 Downloads：${names}。请在 QQ 中手动粘贴。`;
+    toast("文件已上传并写入远端 Linux 文件剪贴板，请在 QQ 中按 Ctrl+V。 ");
+  } catch (error) {
+    const message = error?.message || String(error);
+    status.textContent = `文件剪贴板失败：${message}`;
+    toast(`文件剪贴板失败：${message}`);
+  } finally {
+    setInteractive();
+  }
+}
 function setInteractive() {
   $("disconnect").disabled = !connected && !connectionWanted;
   $("send-clipboard").disabled = !connected || settings.viewOnly;
+  $("send-clipboard-files").disabled =
+    !connected || settings.viewOnly || !isTauriShell();
   if (rfb) rfb.viewOnly = settings.viewOnly;
 }
 
@@ -1040,6 +1095,8 @@ async function connect(prepare = true) {
       resizeObserver?.disconnect();
       frameObserver?.disconnect();
       tauriVncResizeKey = undefined;
+      if (isMainSession && isTauriShell())
+        void tauriInvoke("set_main_window_aspect", { width: 0, height: 0 });
       document.body.classList.remove("tauri-vnc-frame");
       imeOverlay?.close();
       imeOverlay = undefined;
@@ -1319,6 +1376,11 @@ function cancelPassword() {
 }
 $("password-cancel").addEventListener("click", cancelPassword);
 $("password-dialog").addEventListener("cancel", cancelPassword);
+$("send-clipboard-files").addEventListener("click", () => {
+  if (!connected || settings.viewOnly || !isTauriShell()) return;
+  $("send-clipboard-files").disabled = true;
+  void sendClipboardFiles();
+});
 $("send-clipboard").addEventListener("click", () => {
   if (!rfb || !connected || settings.viewOnly) return;
   const text = $("clipboard").value;

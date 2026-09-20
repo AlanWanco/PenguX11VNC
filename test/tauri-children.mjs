@@ -16,6 +16,7 @@ function installTauriFixture(permissions) {
     sizeCalls: [],
     decorationCalls: [],
     dragCalls: 0,
+    invokeCalls: [],
     createdUrls: [],
   };
   class WebviewWindow {
@@ -92,6 +93,11 @@ function installTauriFixture(permissions) {
     async close() {},
   };
   window.__TAURI__ = {
+    core: {
+      async invoke(command, args) {
+        fixture.invokeCalls.push({ command, args });
+      },
+    },
     webviewWindow: { WebviewWindow },
     window: {
       LogicalSize,
@@ -183,6 +189,18 @@ export async function testTauriChildren(browser, app) {
       };
     });
     assert.equal(fitted.decorations, true);
+    const aspectCall = await page.evaluate(() =>
+      window.tauriFixture.invokeCalls.find(
+        (call) =>
+          call.command === "set_main_window_aspect" &&
+          Number(call.args?.width) > 0 &&
+          Number(call.args?.height) > 0,
+      ),
+    );
+    assert(
+      aspectCall && aspectCall.args.width / aspectCall.args.height > 1,
+      "Tauri main window aspect ratio must be registered natively",
+    );
     assert(
       Math.abs(
         fitted.size.width / fitted.contentHeight -

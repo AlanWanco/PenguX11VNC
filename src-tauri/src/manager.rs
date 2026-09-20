@@ -10,7 +10,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -21,6 +21,110 @@ use std::time::{Duration, Instant};
 
 const DEFAULT_CONFIG: &str = ".config/qq-window-viewer/connections.json";
 const VNC_CREDENTIAL_SERVICE: &str = "com.alanwanco.PenguX11VNC";
+const FILE_CLIPBOARD_X11_PYTHON: &str = r#"
+import ctypes as C, ctypes.util as U, sys
+
+D = C.c_void_p
+W = C.c_ulong
+
+class SelectionRequest(C.Structure):
+    _fields_ = [
+        ("type", C.c_int), ("serial", C.c_ulong), ("send_event", C.c_int),
+        ("display", D), ("owner", W), ("requestor", W), ("selection", W),
+        ("target", W), ("property", W), ("time", C.c_ulong),
+    ]
+
+class SelectionClear(C.Structure):
+    _fields_ = [
+        ("type", C.c_int), ("serial", C.c_ulong), ("send_event", C.c_int),
+        ("display", D), ("window", W), ("selection", W), ("time", C.c_ulong),
+    ]
+
+class Event(C.Union):
+    _fields_ = [("type", C.c_int), ("request", SelectionRequest), ("clear", SelectionClear)]
+
+x11 = C.CDLL(U.find_library("X11") or "libX11.so.6")
+x11.XOpenDisplay.argtypes = [C.c_char_p]
+x11.XOpenDisplay.restype = D
+x11.XDefaultScreen.argtypes = [D]
+x11.XDefaultScreen.restype = C.c_int
+x11.XRootWindow.argtypes = [D, C.c_int]
+x11.XRootWindow.restype = W
+x11.XCreateSimpleWindow.argtypes = [D, W, C.c_int, C.c_int, C.c_uint, C.c_uint, C.c_uint, W, W]
+x11.XCreateSimpleWindow.restype = W
+x11.XDestroyWindow.argtypes = [D, W]
+x11.XDestroyWindow.restype = C.c_int
+x11.XCloseDisplay.argtypes = [D]
+x11.XInternAtom.argtypes = [D, C.c_char_p, C.c_int]
+x11.XInternAtom.restype = W
+x11.XSetSelectionOwner.argtypes = [D, W, W, C.c_ulong]
+x11.XGetSelectionOwner.argtypes = [D, W]
+x11.XGetSelectionOwner.restype = W
+x11.XChangeProperty.argtypes = [D, W, W, W, C.c_int, C.c_int, C.c_void_p, C.c_int]
+x11.XSendEvent.argtypes = [D, W, C.c_int, C.c_long, C.POINTER(Event)]
+x11.XNextEvent.argtypes = [D, C.POINTER(Event)]
+x11.XFlush.argtypes = [D]
+
+CurrentTime = 0
+PropModeReplace = 0
+EVENT_SELECTION_REQUEST = 30
+EVENT_SELECTION_NOTIFY = 31
+EVENT_SELECTION_CLEAR = 29
+
+payload = sys.argv[1].encode()
+display = x11.XOpenDisplay(None)
+if not display:
+    raise SystemExit(2)
+screen = x11.XDefaultScreen(display)
+root = x11.XRootWindow(display, screen)
+window = x11.XCreateSimpleWindow(display, root, 0, 0, 1, 1, 0, 0, 0)
+clipboard = x11.XInternAtom(display, b"CLIPBOARD", 0)
+targets = x11.XInternAtom(display, b"TARGETS", 0)
+uri = x11.XInternAtom(display, b"text/uri-list", 0)
+utf8 = x11.XInternAtom(display, b"UTF8_STRING", 0)
+text = x11.XInternAtom(display, b"TEXT", 0)
+string = x11.XInternAtom(display, b"STRING", 0)
+atom = 4
+x11.XSetSelectionOwner(display, clipboard, window, CurrentTime)
+x11.XFlush(display)
+if x11.XGetSelectionOwner(display, clipboard) != window:
+    x11.XDestroyWindow(display, window)
+    x11.XCloseDisplay(display)
+    raise SystemExit(3)
+try:
+    while True:
+        event = Event()
+        x11.XNextEvent(display, C.byref(event))
+        if event.type == EVENT_SELECTION_CLEAR:
+            break
+        if event.type != EVENT_SELECTION_REQUEST:
+            continue
+        request = event.request
+        property_atom = request.property or request.target
+        if request.target == targets:
+            values = (C.c_uint32 * 4)(uri, utf8, text, string)
+            x11.XChangeProperty(display, request.requestor, property_atom, atom, 32, PropModeReplace, values, 4)
+        elif request.target in (uri, utf8, text, string):
+            data = C.create_string_buffer(payload)
+            x11.XChangeProperty(display, request.requestor, property_atom, request.target, 8, PropModeReplace, data, len(payload))
+        else:
+            property_atom = 0
+        response = Event()
+        response.request.type = EVENT_SELECTION_NOTIFY
+        response.request.send_event = 1
+        response.request.display = display
+        response.request.requestor = request.requestor
+        response.request.selection = request.selection
+        response.request.target = request.target
+        response.request.property = property_atom
+        response.request.time = request.time
+        x11.XSendEvent(display, request.requestor, 0, 0, C.byref(response))
+        x11.XFlush(display)
+finally:
+    x11.XDestroyWindow(display, window)
+    x11.XCloseDisplay(display)
+"#;
+
 const CLOSE_X11_WINDOW_PYTHON: &str = r#"
 import ctypes as C, ctypes.util as U, sys, time
 
@@ -334,6 +438,27 @@ pub struct WindowInfo {
     pub height: u32,
 }
 
+pub const CLIPBOARD_FILE_LIMIT: u64 = 50 * 1024 * 1024;
+
+#[derive(Clone, Debug)]
+pub struct LocalClipboardFile {
+    pub path: PathBuf,
+    pub name: String,
+    pub size: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ClipboardFileInfo {
+    pub name: String,
+    pub size: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ClipboardUploadResult {
+    pub files: Vec<ClipboardFileInfo>,
+    pub directory: String,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct ChildSessionInfo {
     pub id: String,
@@ -354,6 +479,80 @@ struct ChildSession {
     info: ChildSessionInfo,
     remote_pid: u32,
     tunnel: Child,
+}
+
+pub fn validate_clipboard_files(paths: &[PathBuf]) -> io::Result<Vec<LocalClipboardFile>> {
+    if paths.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "剪贴板中没有文件",
+        ));
+    }
+    if paths.len() > 64 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "一次最多传送 64 个文件",
+        ));
+    }
+    let mut total = 0_u64;
+    let mut files = Vec::with_capacity(paths.len());
+    for path in paths {
+        if !path.is_absolute() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "剪贴板文件路径必须是绝对路径",
+            ));
+        }
+        let path = fs::canonicalize(path)?;
+        let metadata = fs::metadata(&path)?;
+        if !metadata.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "剪贴板中包含非普通文件，暂不传送文件夹",
+            ));
+        }
+        let name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .filter(|value| {
+                !value.is_empty()
+                    && value.len() <= 240
+                    && *value == value.trim()
+                    && !value.chars().any(|character| character.is_control())
+            })
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "剪贴板文件名包含不可传送的字符",
+                )
+            })?
+            .to_string();
+        let size = metadata.len();
+        total = total
+            .checked_add(size)
+            .ok_or_else(|| io::Error::other("剪贴板文件大小溢出"))?;
+        if total > CLIPBOARD_FILE_LIMIT {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "剪贴板文件合计超过 50 MiB",
+            ));
+        }
+        files.push(LocalClipboardFile { path, name, size });
+    }
+    Ok(files)
+}
+
+fn percent_encode_file_uri(path: &str) -> String {
+    let mut uri = String::from("file://");
+    for byte in path.as_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(*byte, b'-' | b'.' | b'_' | b'~' | b'/') {
+            uri.push(*byte as char);
+        } else {
+            uri.push('%');
+            uri.push_str(&format!("{byte:02X}"));
+        }
+    }
+    uri
 }
 
 struct ManagerState {
@@ -521,6 +720,157 @@ impl ManagerState {
     }
 }
 
+fn upload_clipboard_files(
+    profile: &Profile,
+    paths: Vec<PathBuf>,
+) -> io::Result<ClipboardUploadResult> {
+    let files = validate_clipboard_files(&paths)?;
+    let transfer_id: String = random::<[u8; 12]>()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let mut remote_paths = Vec::with_capacity(files.len());
+    for (index, file) in files.iter().enumerate() {
+        let temporary = format!("/tmp/pengux11vnc-clipboard-{transfer_id}-{index}");
+        if let Err(error) = scp_clipboard_file(profile, &file.path, &temporary) {
+            cleanup_remote_file(profile, &temporary);
+            cleanup_remote_files(profile, &remote_paths);
+            return Err(error);
+        }
+        match move_clipboard_file(profile, &temporary, &file.name, &transfer_id) {
+            Ok(path) => remote_paths.push(path),
+            Err(error) => {
+                cleanup_remote_file(profile, &temporary);
+                cleanup_remote_files(profile, &remote_paths);
+                return Err(error);
+            }
+        }
+    }
+    if let Err(error) = set_remote_file_clipboard(profile, &remote_paths) {
+        cleanup_remote_files(profile, &remote_paths);
+        return Err(error);
+    }
+    Ok(ClipboardUploadResult {
+        files: remote_paths
+            .iter()
+            .zip(files.iter())
+            .map(|(path, file)| ClipboardFileInfo {
+                name: path
+                    .rsplit('/')
+                    .next()
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or(&file.name)
+                    .to_string(),
+                size: file.size,
+            })
+            .collect(),
+        directory: "Downloads".to_string(),
+    })
+}
+
+fn scp_args(profile: &Profile) -> io::Result<Vec<String>> {
+    let mut args = vec![
+        "-q".to_string(),
+        "-o".to_string(),
+        "BatchMode=yes".to_string(),
+        "-o".to_string(),
+        "ConnectTimeout=6".to_string(),
+    ];
+    if let Some(key) = profile.key_file()? {
+        args.extend([
+            "-i".to_string(),
+            key,
+            "-o".to_string(),
+            "IdentitiesOnly=yes".to_string(),
+        ]);
+    }
+    args.extend(["-P".to_string(), profile.ssh_port().to_string()]);
+    Ok(args)
+}
+
+fn wait_for_process(mut child: Child, timeout: Duration) -> io::Result<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return if status.success() {
+                Ok(())
+            } else {
+                Err(io::Error::other("SCP 传输失败"))
+            };
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "SCP 传输超时"));
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn scp_clipboard_file(profile: &Profile, local: &Path, remote: &str) -> io::Result<()> {
+    let target = format!("{}@{}:{remote}", profile.ssh_user(), profile.ssh_host());
+    let child = hidden_command("scp")
+        .args(scp_args(profile)?)
+        .arg(local)
+        .arg(target)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    wait_for_process(child, Duration::from_secs(120))
+}
+
+fn cleanup_remote_file(profile: &Profile, remote: &str) {
+    let _ = run_ssh(
+        profile,
+        &format!("rm -f -- {}", shell_quote(remote)),
+        Duration::from_secs(5),
+    );
+}
+
+fn cleanup_remote_files(profile: &Profile, paths: &[String]) {
+    for path in paths {
+        cleanup_remote_file(profile, path);
+    }
+}
+
+fn move_clipboard_file(
+    profile: &Profile,
+    temporary: &str,
+    name: &str,
+    transfer_id: &str,
+) -> io::Result<String> {
+    let fallback = format!("{name} (PenguX11VNC-{transfer_id})");
+    let command = format!(
+        "set -eu; download_dir=$(xdg-user-dir DOWNLOAD 2>/dev/null || true); if [ -z \"$download_dir\" ]; then download_dir=\"$HOME/Downloads\"; fi; case \"$download_dir\" in /*) ;; *) exit 1 ;; esac; mkdir -p -- \"$download_dir\"; target=\"$download_dir\"/{name}; suffix=0; while :; do if [ \"$suffix\" -gt 0 ]; then target=\"$download_dir\"/{fallback}-$suffix; fi; if mv -n -- {temporary} \"$target\"; then if [ ! -e {temporary} ]; then break; fi; else exit 1; fi; suffix=$((suffix + 1)); done; printf '%s' \"$target\"",
+        name = shell_quote(name),
+        fallback = shell_quote(&fallback),
+        temporary = shell_quote(temporary),
+    );
+    let path = run_ssh(profile, &command, Duration::from_secs(15))?;
+    if path.is_empty() || !path.starts_with('/') {
+        return Err(io::Error::other("远端 Downloads 路径无效"));
+    }
+    Ok(path)
+}
+
+fn set_remote_file_clipboard(profile: &Profile, paths: &[String]) -> io::Result<()> {
+    let mut payload = paths
+        .iter()
+        .map(|path| percent_encode_file_uri(path))
+        .collect::<Vec<_>>()
+        .join("\r\n");
+    payload.push_str("\r\n");
+    let command = format!(
+        "set -eu; export DISPLAY={display}; export XAUTHORITY={auth}; export XDG_RUNTIME_DIR=\"${{XDG_RUNTIME_DIR:-$(dirname -- \"$XAUTHORITY\")}}\"; export WAYLAND_DISPLAY=\"${{WAYLAND_DISPLAY:-wayland-0}}\"; payload={payload}; if command -v wl-copy >/dev/null 2>&1 && printf '%s' \"$payload\" | wl-copy --type text/uri-list; then exit 0; fi; if command -v xclip >/dev/null 2>&1 && printf '%s' \"$payload\" | xclip -selection clipboard -t text/uri-list -i; then exit 0; fi; if command -v python3 >/dev/null 2>&1; then nohup python3 -c {helper} \"$payload\" >/dev/null 2>&1 </dev/null & helper_pid=$!; sleep 0.2; if kill -0 \"$helper_pid\" 2>/dev/null; then exit 0; fi; fi; exit 127",
+        display = shell_quote(&profile.display()),
+        auth = shell_quote(&profile.xauthority()),
+        payload = shell_quote(&payload),
+        helper = shell_quote(FILE_CLIPBOARD_X11_PYTHON),
+    );
+    run_ssh(profile, &command, Duration::from_secs(20)).map(|_| ())
+}
+
 pub struct ManagerRuntime {
     pub url: String,
     pub token: String,
@@ -570,6 +920,16 @@ impl ManagerRuntime {
             shutdown,
             join: Some(join),
         })
+    }
+
+    pub fn upload_clipboard_files(&self, paths: Vec<PathBuf>) -> io::Result<ClipboardUploadResult> {
+        let profile = self
+            .state
+            .lock()
+            .map_err(|_| io::Error::other("manager locked"))?
+            .profile
+            .clone();
+        upload_clipboard_files(&profile, paths)
     }
 
     pub fn cleanup_session(&self, id: &str) {
@@ -1280,5 +1640,38 @@ mod onboarding_http_tests {
         );
         assert!(save.contains("请确认仅启动所选"));
         manager.stop();
+    }
+}
+
+#[cfg(test)]
+mod clipboard_tests {
+    use super::*;
+
+    #[test]
+    fn file_uri_encodes_non_uri_path_bytes() {
+        assert_eq!(
+            percent_encode_file_uri("/home/user/报告 1#.txt"),
+            "file:///home/user/%E6%8A%A5%E5%91%8A%201%23.txt"
+        );
+    }
+
+    #[test]
+    fn clipboard_validation_accepts_files_and_rejects_directories() {
+        let root =
+            std::env::temp_dir().join(format!("pengux11vnc-clipboard-test-{}", std::process::id()));
+        let file = root.join("sample.txt");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(&file, b"sample").unwrap();
+        let files = validate_clipboard_files(std::slice::from_ref(&file)).unwrap();
+        assert_eq!(files[0].name, "sample.txt");
+        assert_eq!(files[0].size, 6);
+        let directory_error = validate_clipboard_files(std::slice::from_ref(&root)).unwrap_err();
+        assert_eq!(directory_error.kind(), io::ErrorKind::InvalidInput);
+        let oversized = root.join("oversized.bin");
+        let oversized_file = fs::File::create(&oversized).unwrap();
+        oversized_file.set_len(CLIPBOARD_FILE_LIMIT + 1).unwrap();
+        let size_error = validate_clipboard_files(std::slice::from_ref(&oversized)).unwrap_err();
+        assert_eq!(size_error.kind(), io::ErrorKind::InvalidInput);
+        fs::remove_dir_all(root).unwrap();
     }
 }
