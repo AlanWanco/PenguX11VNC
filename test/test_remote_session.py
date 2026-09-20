@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location(
@@ -32,6 +33,17 @@ class RemoteSessionTests(unittest.TestCase):
             self.assertFalse(REMOTE.valid_password_file(str(link)))
             path.write_bytes(bytes(7))
             self.assertFalse(REMOTE.valid_password_file(str(path)))
+
+    def test_blank_password_path_finds_runtime_default(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            password = runtime / "x11vnc.pass"
+            password.write_bytes(bytes(8))
+            password.chmod(0o600)
+            with mock.patch.dict(
+                os.environ, {"XDG_RUNTIME_DIR": str(runtime)}, clear=False
+            ):
+                self.assertEqual(REMOTE.select_password_file(""), password)
 
     def test_recycled_xid_is_not_same_window(self) -> None:
         target = {

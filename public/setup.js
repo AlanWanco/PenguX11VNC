@@ -70,12 +70,16 @@ $("setup-form").addEventListener("submit", async (event) => {
       },
       remotePasswordFile: $("setup-password-path").value.trim(),
     });
+    const passwordPath = report.passwordFile || "自动默认路径";
+    const passwordCheck = report.passwordReady
+      ? `远端 VNC 密码文件有效且权限私有（使用 ${passwordPath}）`
+      : `远端 VNC 密码文件待处理（已检查 ${passwordPath}）`;
     const checks = [
       [true, "SSH 与 Python 3 预检通道可用"],
       [report.running, "当前用户的 QQ 进程"],
       [report.displayAccessible, "可访问 QQ 的 X11/Xwayland 会话"],
       [report.x11vnc, "x11vnc 已安装"],
-      [report.passwordReady, "远端 VNC 密码文件有效且权限私有"],
+      [report.passwordReady, passwordCheck],
       [
         report.windows.length > 0,
         `可见的 QQ 主窗口候选：${report.windows.length} 个`,
@@ -107,7 +111,11 @@ $("setup-form").addEventListener("submit", async (event) => {
     status(
       ready
         ? "预检完成。请核对窗口与授权范围，再保存。尚未启动远端服务。"
-        : "预检完成，但还有待处理项目。按下方引导准备远端后重新预检。",
+        : `预检完成，但还有待处理项目。${
+            report.passwordReady
+              ? "按下方引导准备远端后重新预检。"
+              : `未找到有效的远端 VNC 密码文件；留空会自动检查默认路径（${passwordPath}）。`
+          }`,
     );
   } catch (error) {
     status(error.message);

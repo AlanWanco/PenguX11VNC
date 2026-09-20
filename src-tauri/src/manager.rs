@@ -6,6 +6,7 @@ use rand::random;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
@@ -19,6 +20,21 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 const DEFAULT_CONFIG: &str = ".config/qq-window-viewer/connections.json";
+
+pub(crate) fn hidden_command<S: AsRef<OsStr>>(program: S) -> Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        let mut command = Command::new(program);
+        command.creation_flags(CREATE_NO_WINDOW);
+        command
+    }
+    #[cfg(not(windows))]
+    {
+        Command::new(program)
+    }
+}
 
 #[derive(Clone)]
 pub struct Profile {
@@ -260,7 +276,7 @@ impl ManagerState {
         let remote_port = self.find_remote_port()?;
         let local_port = allocate_port()?;
         let remote_pid = start_remote_vnc(&self.profile, &window, remote_port)?;
-        let mut tunnel = Command::new("ssh")
+        let mut tunnel = hidden_command("ssh")
             .args(ssh_args(
                 &self.profile,
                 Some((local_port, remote_port)),
@@ -449,7 +465,7 @@ pub fn start_main_tunnel(profile: &Profile) -> io::Result<Option<Child>> {
     if check_rfb(profile.local_port()) {
         return Ok(None);
     }
-    let mut child = Command::new("ssh")
+    let mut child = hidden_command("ssh")
         .args(ssh_args(
             profile,
             Some((profile.local_port(), profile.remote_port())),
@@ -587,7 +603,7 @@ fn ssh_args(
 fn run_ssh(profile: &Profile, command: &str, timeout: Duration) -> io::Result<String> {
     let mut args = ssh_args(profile, None, false)?;
     args.push(command.to_string());
-    let mut child = Command::new("ssh")
+    let mut child = hidden_command("ssh")
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -745,7 +761,6 @@ fn validate_profile(raw: &Value) -> io::Result<()> {
         profile.xauthority(),
         profile.window_list_helper(),
         profile.ime_helper(),
-        profile.remote_password_file(),
     ] {
         if !value.starts_with('/')
             || !value
@@ -754,6 +769,17 @@ fn validate_profile(raw: &Value) -> io::Result<()> {
         {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "远端路径无效"));
         }
+    }
+    let password_file = profile.remote_password_file();
+    if !(password_file.starts_with('/') || password_file.starts_with("~/"))
+        || !password_file
+            .chars()
+            .all(|char| char.is_ascii_alphanumeric() || "/_.:-~".contains(char))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "远端 VNC 密码文件路径无效",
+        ));
     }
     if !valid_window_id(&profile.window_id()) {
         return Err(io::Error::new(
@@ -814,7 +840,7 @@ fn stream_ime(mut stream: TcpStream, state: Arc<Mutex<ManagerState>>) {
         Err(_) => return,
     };
     args.push(command);
-    let child = Command::new("ssh")
+    let child = hidden_command("ssh")
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

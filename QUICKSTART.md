@@ -86,20 +86,20 @@ chmod 600 ~/.config/qq-window-viewer/connections.json
 
 编辑以下字段：
 
-| 字段                                   | 含义                                            |
-| -------------------------------------- | ----------------------------------------------- |
-| `ssh.user` / `ssh.host` / `ssh.port`   | SSH 登录信息                                    |
-| `ssh.privateKeyFile`                   | 本机私钥路径；留空表示使用 agent/默认密钥       |
-| `tunnel.localPort`                     | 本机端口，通常 `15900`                          |
-| `tunnel.remoteHost` / `remotePort`     | 远端 x11vnc 地址，通常 `127.0.0.1:5900`         |
-| `vnc.passwordFile`                     | 本机 VNC 密码文件；没有则弹窗输入               |
-| `vnc.remotePasswordFile`               | Linux 上 x11vnc 使用的密码文件                  |
-| `window.display` / `xauthority` / `id` | Linux Xwayland 会话信息                         |
-| `helpers.windowList` / `imeCapture`    | 远端 helper 的绝对路径                          |
-| `clipboard.sync`                       | 是否允许此配置档启用剪贴板同步，默认 `false`    |
-| `viewer.bitrate`                       | `lossless`、`high`、`balanced`、`low`；默认无损 |
-| `viewer.frameRate`                     | `0` 不限，或 `5/10/15/24/30/60`；默认 `30`      |
-| `viewer.uiCollapsed`                   | 是否启动时收起 UI；收起后仍保留底部状态栏       |
+| 字段                                   | 含义                                                                                                                       |
+| -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `ssh.user` / `ssh.host` / `ssh.port`   | SSH 登录信息                                                                                                               |
+| `ssh.privateKeyFile`                   | 本机私钥路径；留空表示使用 agent/默认密钥                                                                                  |
+| `tunnel.localPort`                     | 本机端口，通常 `15900`                                                                                                     |
+| `tunnel.remoteHost` / `remotePort`     | 远端 x11vnc 地址，通常 `127.0.0.1:5900`                                                                                    |
+| `vnc.passwordFile`                     | 本机 VNC 密码文件；没有则弹窗输入                                                                                          |
+| `vnc.remotePasswordFile`               | Linux 上 x11vnc 使用的密码文件；向导留空会自动检查 `$XDG_RUNTIME_DIR/x11vnc.pass` 与 `~/.config/qq-window-viewer/vnc.pass` |
+| `window.display` / `xauthority` / `id` | Linux Xwayland 会话信息                                                                                                    |
+| `helpers.windowList` / `imeCapture`    | 远端 helper 的绝对路径                                                                                                     |
+| `clipboard.sync`                       | 是否允许此配置档启用剪贴板同步，默认 `false`                                                                               |
+| `viewer.bitrate`                       | `lossless`、`high`、`balanced`、`low`；默认无损                                                                            |
+| `viewer.frameRate`                     | `0` 不限，或 `5/10/15/24/30/60`；默认 `30`                                                                                 |
+| `viewer.uiCollapsed`                   | 是否启动时收起 UI；收起后仍保留底部状态栏                                                                                  |
 
 主窗口运行时修改的显示设置会保存到 `~/.config/qq-window-viewer/settings.json`；QQ 子窗口继承主窗口设置。
 

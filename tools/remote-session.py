@@ -277,6 +277,30 @@ def valid_password_file(name: str) -> bool:
         return False
 
 
+def default_password_files() -> list[Path]:
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    candidates = [
+        Path(runtime_dir) / "x11vnc.pass",
+        Path.home() / ".config/qq-window-viewer/vnc.pass",
+    ]
+    unique: list[Path] = []
+    for candidate in candidates:
+        if candidate not in unique:
+            unique.append(candidate)
+    return unique
+
+
+def select_password_file(requested: str) -> Path:
+    explicit = requested.strip()
+    if explicit:
+        return Path(explicit).expanduser()
+    candidates = default_password_files()
+    for candidate in candidates:
+        if valid_password_file(str(candidate)):
+            return candidate
+    return candidates[0]
+
+
 def probe(options: dict) -> dict:
     running, displays = sessions()
     windows, accessible = [], 0
@@ -290,9 +314,7 @@ def probe(options: dict) -> dict:
                 x11.close()
         except (OSError, RuntimeError):
             continue
-    password_file = options.get("passwordFile") or str(
-        Path.home() / ".config/qq-window-viewer/vnc.pass"
-    )
+    password_file = select_password_file(str(options.get("passwordFile") or ""))
     helper = Path.home() / ".local/lib/qq-window-viewer"
     return {
         "processes": [

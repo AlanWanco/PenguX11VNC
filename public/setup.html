@@ -97,7 +97,10 @@
                 autocomplete="off"
             /></label>
             <p class="help">
-              这是远端文件路径，不是密码。留空不会沿用旧设备的临时密码路径。
+              这是远端文件路径，不是密码。留空会自动检查远端
+              <code>$XDG_RUNTIME_DIR/x11vnc.pass</code>（通常是
+              <code>/run/user/&lt;UID&gt;/x11vnc.pass</code>）和
+              <code>~/.config/qq-window-viewer/vnc.pass</code>，不需要猜路径。
             </p>
           </details>
           <button type="submit" id="setup-probe" class="primary">
@@ -194,8 +197,8 @@ chmod 600 ~/.config/qq-window-viewer/vnc.pass</pre>
       </details>
       <p class="help">
         配置仅存于本机
-        ~/.config/qq-window-viewer/connections.json。保存前备份原文件；令牌、密码、私钥不写入此配置。当前仍需要本机
-        Node.js、系统 OpenSSH；Windows 路径和 agent 尚需平台验证。
+        ~/.config/qq-window-viewer/connections.json。保存前备份原文件；令牌、密码、私钥不写入此配置。当前仍需要系统
+        OpenSSH；安装包已内置 Node.js。
       </p>
       <button id="setup-back" disabled>返回已有连接（不保存）</button>
     </article>

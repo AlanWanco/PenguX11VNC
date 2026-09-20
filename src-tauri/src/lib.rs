@@ -1,11 +1,11 @@
 mod manager;
 
-use manager::{startup_profile, ManagerRuntime, Profile};
+use manager::{hidden_command, startup_profile, ManagerRuntime, Profile};
 use serde_json::json;
 use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Mutex,
@@ -144,7 +144,7 @@ fn start_node(
         fs::set_permissions(&log_path, fs::Permissions::from_mode(0o600))?;
     }
 
-    let mut command = Command::new(bundled_node(root));
+    let mut command = hidden_command(bundled_node(root));
     command
         .arg(root.join("server.js"))
         .current_dir(root)

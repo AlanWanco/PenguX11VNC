@@ -91,15 +91,18 @@ fn write_config_to(profile: &Profile, path: &std::path::Path) -> io::Result<()> 
         .ok_or_else(|| io::Error::other("配置目录无效"))?;
     fs::create_dir_all(parent)?;
     let suffix = random_token();
-    if path.exists() {
+    let _backup = if path.exists() {
         let backup = path.with_extension(format!("json.backup-{}", &suffix[..12]));
         fs::copy(path, &backup)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(backup, fs::Permissions::from_mode(0o600))?;
+            fs::set_permissions(&backup, fs::Permissions::from_mode(0o600))?;
         }
-    }
+        Some(backup)
+    } else {
+        None
+    };
     let temp = path.with_extension(format!("tmp-{}", &suffix[..12]));
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
@@ -111,8 +114,21 @@ fn write_config_to(profile: &Profile, path: &std::path::Path) -> io::Result<()> 
     let mut file = options.open(&temp)?;
     file.write_all(&serde_json::to_vec_pretty(&document)?)?;
     file.sync_all()?;
+    // Unix rename replaces an existing file; Windows requires removing the
+    // destination first. The backup above gives us a recovery copy if the
+    // replacement fails.
+    #[cfg(windows)]
+    if path.exists() {
+        fs::remove_file(path)?;
+    }
     if let Err(error) = fs::rename(&temp, path) {
-        let _ = fs::remove_file(temp);
+        let _ = fs::remove_file(&temp);
+        #[cfg(windows)]
+        if !path.exists() {
+            if let Some(backup) = _backup.as_ref() {
+                let _ = fs::copy(backup, path);
+            }
+        }
         return Err(error);
     }
     Ok(())
@@ -174,7 +190,7 @@ fn public_report(report: &Value) -> Value {
         .collect();
     json!({"running": report["running"], "displayAccessible": report["displayAccessible"],
         "x11vnc": report["x11vnc"], "passwordReady": report["passwordReady"],
-        "imeReady": report["imeReady"], "windows": windows})
+        "passwordFile": report["passwordFile"], "imeReady": report["imeReady"], "windows": windows})
 }
 
 fn same_identity(a: &Value, b: &Value) -> bool {
@@ -245,7 +261,7 @@ fn spawn_main(profile: &Profile, target: &Value, report: &Value) -> io::Result<L
         &json!({"target": target, "passwordFile": report["passwordFile"]}),
     ));
     let local_port = allocate_port()?;
-    let mut remote = Command::new("ssh")
+    let mut remote = hidden_command("ssh")
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -278,7 +294,7 @@ fn spawn_main(profile: &Profile, target: &Value, report: &Value) -> io::Result<L
         .filter(|n| *n >= 1024)
         .ok_or_else(|| io::Error::other("远端未确认单窗口 VNC 就绪"))?;
     live.tunnel = Some(
-        Command::new("ssh")
+        hidden_command("ssh")
             .args(ssh_args(profile, Some((live.port, remote_port)), true)?)
             .stdin(Stdio::null())
             .stdout(Stdio::null())

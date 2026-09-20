@@ -66,7 +66,7 @@ jobs:
         run: |
           cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
           cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
-          cargo test --manifest-path src-tauri/Cargo.toml
+          cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1
 
   build-native:
     name: Build ${{ matrix.id }}
@@ -108,6 +108,10 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+      - name: Set artifact identity
+        id: metadata
+        shell: bash
+        run: echo "short_sha=${GITHUB_SHA:0:12}" >> "$GITHUB_OUTPUT"
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
@@ -146,16 +150,33 @@ jobs:
       - name: Build one installer bundle
         shell: bash
         run: |
-          npm run tauri:build -- \
-            --target "${{ matrix.target }}" \
-            --bundles "${{ matrix.bundle }}"
+          if [[ "${{ matrix.id }}" == "macos-arm64" ]]; then
+            # GitHub-hosted macOS runners have no Finder session. Avoid
+            # Tauri's create-dmg AppleScript step and create a headless DMG.
+            npm run tauri:build -- \
+              --target "${{ matrix.target }}" \
+              --bundles app
+            app_path="src-tauri/target/${{ matrix.target }}/release/bundle/macos/PenguX11VNC.app"
+            dmg_dir="src-tauri/target/${{ matrix.target }}/release/bundle/dmg"
+            mkdir -p "$dmg_dir"
+            hdiutil create \
+              -volname "PenguX11VNC" \
+              -srcfolder "$app_path" \
+              -ov \
+              -format UDZO \
+              "$dmg_dir/PenguX11VNC_ci.dmg"
+          else
+            npm run tauri:build -- \
+              --target "${{ matrix.target }}" \
+              --bundles "${{ matrix.bundle }}"
+          fi
       - name: Normalize artifact name
         shell: bash
         run: |
           python tools/collect-bundle.py \
             --bundle-root "src-tauri/target/${{ matrix.target }}/release/bundle/${{ matrix.bundle_dir }}" \
             --bundle "${{ matrix.bundle }}" \
-            --name "PenguX11VNC-${{ matrix.id }}-${{ github.sha }}"
+            --name "PenguX11VNC-${{ matrix.id }}-${{ steps.metadata.outputs.short_sha }}"
           python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
           from pathlib import Path
           import hashlib
@@ -165,13 +186,13 @@ jobs:
           print(f"- Target: `${{ matrix.target }}`")
           print(f"- Runner: `${{ matrix.runner }}`")
           print(f"- SHA-256: `{digest}`")
-          print("- Download: this job's `PenguX11VNC-${{ matrix.id }}-${{ github.sha }}` artifact")
+          print("- Download: this job's `PenguX11VNC-${{ matrix.id }}-${{ steps.metadata.outputs.short_sha }}` artifact")
           print("- Unsigned debug bundle; install/use only on a trusted test machine.")
           PY
       - name: Upload one debug artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PenguX11VNC-${{ matrix.id }}-${{ github.sha }}
+          name: PenguX11VNC-${{ matrix.id }}-${{ steps.metadata.outputs.short_sha }}
           path: dist/*
           if-no-files-found: error
           retention-days: 14
@@ -185,6 +206,10 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+      - name: Set artifact identity
+        id: metadata
+        shell: bash
+        run: echo "short_sha=${GITHUB_SHA:0:12}" >> "$GITHUB_OUTPUT"
       - name: Enable ARM64 emulation
         uses: docker/setup-qemu-action@v3
         with:
@@ -195,6 +220,7 @@ jobs:
         run: |
           docker run --rm --platform linux/arm64 \
             -e NODE_VERSION="$NODE_VERSION" \
+            -e SHORT_SHA="${{ steps.metadata.outputs.short_sha }}" \
             -v "$WORKSPACE:/workspace" \
             -w /workspace \
             ubuntu:24.04 \
@@ -225,7 +251,7 @@ jobs:
               python3 tools/collect-bundle.py \
                 --bundle-root src-tauri/target/aarch64-unknown-linux-gnu/release/bundle/appimage \
                 --bundle appimage \
-                --name "PenguX11VNC-linux-arm64-${{ github.sha }}"
+                --name "PenguX11VNC-linux-arm64-${SHORT_SHA}"
             '
       - name: Write build summary
         run: |
@@ -238,13 +264,13 @@ jobs:
           print("- Target: `aarch64-unknown-linux-gnu`")
           print("- Build userspace: `linux/arm64` under QEMU")
           print(f"- SHA-256: `{digest}`")
-          print("- Download: this job's `PenguX11VNC-linux-arm64-${{ github.sha }}` artifact")
+          print("- Download: this job's `PenguX11VNC-linux-arm64-${{ steps.metadata.outputs.short_sha }}` artifact")
           print("- Unsigned debug bundle; install/use only on a trusted test machine.")
           PY
       - name: Upload one debug artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PenguX11VNC-linux-arm64-${{ github.sha }}
+          name: PenguX11VNC-linux-arm64-${{ steps.metadata.outputs.short_sha }}
           path: dist/*
           if-no-files-found: error
           retention-days: 14
