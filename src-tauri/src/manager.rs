@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 const DEFAULT_CONFIG: &str = ".config/qq-window-viewer/connections.json";
 const VNC_CREDENTIAL_SERVICE: &str = "com.alanwanco.PenguX11VNC";
 const CLOSE_X11_WINDOW_PYTHON: &str = r#"
-import ctypes as C, ctypes.util as U, sys
+import ctypes as C, ctypes.util as U, sys, time
 
 D = C.c_void_p
 W = C.c_ulong
@@ -51,10 +51,14 @@ class ClientMessage(C.Structure):
         ("format", C.c_int), ("data", C.c_long * 5),
     ]
 
+ERROR_HANDLER = C.CFUNCTYPE(C.c_int, D, C.c_void_p)
+
 x11 = C.CDLL(U.find_library("X11") or "libX11.so.6")
 x11.XOpenDisplay.argtypes = [C.c_char_p]
 x11.XOpenDisplay.restype = D
 x11.XCloseDisplay.argtypes = [D]
+x11.XSetErrorHandler.argtypes = [ERROR_HANDLER]
+x11.XSetErrorHandler.restype = ERROR_HANDLER
 x11.XInternAtom.argtypes = [D, C.c_char_p, C.c_int]
 x11.XInternAtom.restype = W
 x11.XGetClassHint.argtypes = [D, W, C.POINTER(ClassHint)]
@@ -65,8 +69,13 @@ x11.XGetWMProtocols.argtypes = [D, W, C.POINTER(C.POINTER(W)), C.POINTER(C.c_int
 x11.XGetWMProtocols.restype = C.c_int
 x11.XSendEvent.argtypes = [D, W, C.c_int, C.c_long, C.c_void_p]
 x11.XSendEvent.restype = C.c_int
+x11.XDestroyWindow.argtypes = [D, W]
+x11.XDestroyWindow.restype = C.c_int
 x11.XFlush.argtypes = [D]
+x11.XSync.argtypes = [D, C.c_int]
 x11.XFree.argtypes = [C.c_void_p]
+
+ignore_error = ERROR_HANDLER(lambda *_: 0)
 
 
 def stop(code):
@@ -76,6 +85,7 @@ def stop(code):
 display = x11.XOpenDisplay(None)
 if not display:
     stop(3)
+x11.XSetErrorHandler(ignore_error)
 window = W(int(sys.argv[1], 0))
 expected_class = sys.argv[2].casefold()
 hint = ClassHint()
@@ -100,16 +110,24 @@ wm_protocols = x11.XInternAtom(display, b"WM_PROTOCOLS", 0)
 wm_delete = x11.XInternAtom(display, b"WM_DELETE_WINDOW", 0)
 protocols = C.POINTER(W)()
 count = C.c_int()
+def destroy_window():
+    x11.XDestroyWindow(display, window)
+    x11.XFlush(display)
+    x11.XSync(display, 0)
+
+
 if not x11.XGetWMProtocols(display, window, C.byref(protocols), C.byref(count)):
+    destroy_window()
     x11.XCloseDisplay(display)
-    stop(7)
+    stop(0)
 try:
     supported = any(protocols[index] == wm_delete for index in range(count.value))
 finally:
     x11.XFree(protocols)
 if not supported:
+    destroy_window()
     x11.XCloseDisplay(display)
-    stop(8)
+    stop(0)
 event = ClientMessage()
 event.type = 33
 event.send_event = 1
@@ -121,9 +139,15 @@ event.data[0] = wm_delete
 event.data[1] = 0
 event_mask = 0xC0000
 if not x11.XSendEvent(display, window, 0, event_mask, C.byref(event)):
+    destroy_window()
     x11.XCloseDisplay(display)
-    stop(9)
+    stop(0)
 x11.XFlush(display)
+x11.XSync(display, 0)
+time.sleep(0.15)
+attrs = Attributes()
+if x11.XGetWindowAttributes(display, window, C.byref(attrs)) and attrs.map_state == 2:
+    destroy_window()
 x11.XCloseDisplay(display)
 "#;
 

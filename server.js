@@ -324,6 +324,7 @@ export async function startServer({
         targetPort: mainPort,
         windowId: profile.window.id,
         lastSeen: Date.now(),
+        viewerCount: 0,
         child: false,
       },
     ],
@@ -437,6 +438,7 @@ export async function startServer({
         localPort: child.localPort,
         remotePort: child.remotePort,
         lastSeen: Date.now(),
+        viewerCount: 0,
       };
       sessions.set(session.id, session);
       childProcesses.set(session.id, session);
@@ -504,6 +506,7 @@ export async function startServer({
       windowId: windowInfo.id,
       geometry: windowInfo,
       lastSeen: Date.now(),
+      viewerCount: 0,
     };
     sessions.set(sessionId, session);
     childProcesses.set(sessionId, session);
@@ -514,9 +517,24 @@ export async function startServer({
     return session;
   }
 
+  function scheduleUnviewedCleanup(session) {
+    if (!session || session.id === "main" || session.viewerCount > 0) return;
+    clearTimeout(session.viewerCleanupTimer);
+    const lastSeen = session.lastSeen;
+    session.viewerCleanupTimer = setTimeout(() => {
+      if (
+        session.viewerCount === 0 &&
+        session.lastSeen === lastSeen &&
+        childProcesses.has(session.id)
+      )
+        void cleanupSession(session);
+    }, 250);
+    session.viewerCleanupTimer.unref?.();
+  }
   async function cleanupSession(session) {
     if (!session || session.id === "main" || !childProcesses.has(session.id))
       return;
+    clearTimeout(session.viewerCleanupTimer);
     sessions.delete(session.id);
     childProcesses.delete(session.id);
     if (rustManager) {
@@ -878,7 +896,17 @@ export async function startServer({
     }
     wss.handleUpgrade(req, socket, head, (ws) => {
       ws.viewerSession = session.id;
+      clearTimeout(session.viewerCleanupTimer);
+      session.viewerCount = (session.viewerCount || 0) + 1;
       session.lastSeen = Date.now();
+      let released = false;
+      const releaseViewer = () => {
+        if (released) return;
+        released = true;
+        session.viewerCount = Math.max(0, (session.viewerCount || 1) - 1);
+        scheduleUnviewedCleanup(session);
+      };
+      ws.once("close", releaseViewer);
       const upstream = net.createConnection({
         host: "127.0.0.1",
         port: session.targetPort,

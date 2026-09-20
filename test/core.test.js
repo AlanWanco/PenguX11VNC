@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
+import net from "node:net";
+import { once } from "node:events";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -207,6 +209,103 @@ test("VNC credentials are shared in memory and cleared on request", async (t) =>
     headers,
   });
   assert.deepEqual(await empty.json(), {});
+});
+
+test("closing a child VNC websocket reclaims its remote session", async (t) => {
+  const managerToken = "test-manager-token";
+  const deleted = [];
+  const manager = http.createServer((req, res) => {
+    if (req.headers["x-pengux11vnc-token"] !== managerToken) {
+      res.writeHead(403).end();
+      return;
+    }
+    res.setHeader("Content-Type", "application/json");
+    if (req.url === "/windows") {
+      res.end(
+        JSON.stringify({
+          windows: [
+            {
+              id: "0x2",
+              mapped: true,
+              depth: 24,
+              x: 0,
+              y: 0,
+              width: 100,
+              height: 100,
+            },
+          ],
+        }),
+      );
+      return;
+    }
+    if (req.url === "/windows/0x2/open") {
+      const session = {
+        id: "window-2",
+        title: "QQ 子窗口 · 0x2",
+        windowId: "0x2",
+        child: true,
+        targetPort: rfbPort,
+        localPort: rfbPort,
+        remotePort: 5901,
+        geometry: {
+          id: "0x2",
+          mapped: true,
+          depth: 24,
+          x: 0,
+          y: 0,
+          width: 100,
+          height: 100,
+        },
+      };
+      res.end(JSON.stringify({ session }));
+      return;
+    }
+    if (req.url === "/sessions/window-2" && req.method === "DELETE") {
+      deleted.push(req.url);
+      res.end(JSON.stringify({ ok: true }));
+      return;
+    }
+    res.writeHead(404).end();
+  });
+  const rfbServer = net.createServer(() => {});
+  await new Promise((resolve) => rfbServer.listen(0, "127.0.0.1", resolve));
+  const rfbPort = rfbServer.address().port;
+  await new Promise((resolve) => manager.listen(0, "127.0.0.1", resolve));
+  const managerPort = manager.address().port;
+  const app = await startServer({
+    port: 0,
+    targetPort: rfbPort,
+    manager: {
+      url: `http://127.0.0.1:${managerPort}`,
+      token: managerToken,
+    },
+    connection: {
+      id: "test-child",
+      children: { enabled: true },
+      window: { id: "0x1", className: "QQ" },
+    },
+  });
+  t.after(async () => {
+    await app.close();
+    await new Promise((resolve) => manager.close(resolve));
+    await new Promise((resolve) => rfbServer.close(resolve));
+  });
+  const headers = { "X-QQ-Token": app.token };
+  const opened = await fetch(
+    `${app.origin}/api/windows/0x2/open?session=main`,
+    { method: "POST", headers },
+  );
+  assert.equal(opened.status, 200);
+  const child = await opened.json();
+  const ws = new WebSocket(
+    `${app.origin.replace("http:", "ws:")}/vnc?session=${child.session.id}`,
+    { headers: { Origin: app.origin, "X-QQ-Token": app.token } },
+  );
+  await once(ws, "open");
+  ws.close();
+  await once(ws, "close");
+  await new Promise((resolve) => setTimeout(resolve, 800));
+  assert.deepEqual(deleted, ["/sessions/window-2"]);
 });
 
 test("local server restricts API, Origin, Host, static files and WebSocket access", async (t) => {
