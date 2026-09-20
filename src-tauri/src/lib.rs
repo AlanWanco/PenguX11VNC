@@ -235,9 +235,28 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if window.label() == "main" && matches!(event, WindowEvent::CloseRequested { .. }) {
+            let closing = matches!(
+                event,
+                WindowEvent::CloseRequested { .. } | WindowEvent::Destroyed
+            );
+            if !closing {
+                return;
+            }
+            if window.label() == "main" {
                 if let Some(state) = window.app_handle().try_state::<RuntimeState>() {
                     state.stop();
+                }
+                return;
+            }
+            let Some(window_id) = window.label().strip_prefix("qq-child-") else {
+                return;
+            };
+            let session_id = format!("window-{window_id}");
+            if let Some(state) = window.app_handle().try_state::<RuntimeState>() {
+                if let Ok(manager) = state.manager.lock() {
+                    if let Some(manager) = manager.as_ref() {
+                        manager.cleanup_session(&session_id);
+                    }
                 }
             }
         })

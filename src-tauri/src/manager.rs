@@ -21,6 +21,111 @@ use std::time::{Duration, Instant};
 
 const DEFAULT_CONFIG: &str = ".config/qq-window-viewer/connections.json";
 const VNC_CREDENTIAL_SERVICE: &str = "com.alanwanco.PenguX11VNC";
+const CLOSE_X11_WINDOW_PYTHON: &str = r#"
+import ctypes as C, ctypes.util as U, sys
+
+D = C.c_void_p
+W = C.c_ulong
+
+class ClassHint(C.Structure):
+    _fields_ = [("name", C.c_void_p), ("klass", C.c_void_p)]
+
+class Attributes(C.Structure):
+    _fields_ = [
+        ("x", C.c_int), ("y", C.c_int), ("width", C.c_int),
+        ("height", C.c_int), ("border_width", C.c_int), ("depth", C.c_int),
+        ("visual", C.c_void_p), ("root", C.c_ulong), ("klass", C.c_int),
+        ("bit_gravity", C.c_int), ("win_gravity", C.c_int),
+        ("backing_store", C.c_int), ("backing_planes", C.c_ulong),
+        ("backing_pixel", C.c_ulong), ("save_under", C.c_int),
+        ("colormap", C.c_ulong), ("map_installed", C.c_int),
+        ("map_state", C.c_int), ("all_event_masks", C.c_long),
+        ("your_event_mask", C.c_long), ("do_not_propagate_mask", C.c_long),
+        ("override_redirect", C.c_int), ("screen", C.c_void_p),
+    ]
+
+class ClientMessage(C.Structure):
+    _fields_ = [
+        ("type", C.c_int), ("serial", C.c_ulong), ("send_event", C.c_int),
+        ("display", D), ("window", W), ("message_type", W),
+        ("format", C.c_int), ("data", C.c_long * 5),
+    ]
+
+x11 = C.CDLL(U.find_library("X11") or "libX11.so.6")
+x11.XOpenDisplay.argtypes = [C.c_char_p]
+x11.XOpenDisplay.restype = D
+x11.XCloseDisplay.argtypes = [D]
+x11.XInternAtom.argtypes = [D, C.c_char_p, C.c_int]
+x11.XInternAtom.restype = W
+x11.XGetClassHint.argtypes = [D, W, C.POINTER(ClassHint)]
+x11.XGetClassHint.restype = C.c_int
+x11.XGetWindowAttributes.argtypes = [D, W, C.POINTER(Attributes)]
+x11.XGetWindowAttributes.restype = C.c_int
+x11.XGetWMProtocols.argtypes = [D, W, C.POINTER(C.POINTER(W)), C.POINTER(C.c_int)]
+x11.XGetWMProtocols.restype = C.c_int
+x11.XSendEvent.argtypes = [D, W, C.c_int, C.c_long, C.c_void_p]
+x11.XSendEvent.restype = C.c_int
+x11.XFlush.argtypes = [D]
+x11.XFree.argtypes = [C.c_void_p]
+
+
+def stop(code):
+    raise SystemExit(code)
+
+
+display = x11.XOpenDisplay(None)
+if not display:
+    stop(3)
+window = W(int(sys.argv[1], 0))
+expected_class = sys.argv[2].casefold()
+hint = ClassHint()
+if not x11.XGetClassHint(display, window, C.byref(hint)):
+    x11.XCloseDisplay(display)
+    stop(4)
+try:
+    actual_class = C.string_at(hint.klass).decode(errors="replace") if hint.klass else ""
+finally:
+    if hint.name:
+        x11.XFree(hint.name)
+    if hint.klass:
+        x11.XFree(hint.klass)
+if actual_class.casefold() != expected_class:
+    x11.XCloseDisplay(display)
+    stop(5)
+attrs = Attributes()
+if not x11.XGetWindowAttributes(display, window, C.byref(attrs)) or attrs.map_state != 2:
+    x11.XCloseDisplay(display)
+    stop(6)
+wm_protocols = x11.XInternAtom(display, b"WM_PROTOCOLS", 0)
+wm_delete = x11.XInternAtom(display, b"WM_DELETE_WINDOW", 0)
+protocols = C.POINTER(W)()
+count = C.c_int()
+if not x11.XGetWMProtocols(display, window, C.byref(protocols), C.byref(count)):
+    x11.XCloseDisplay(display)
+    stop(7)
+try:
+    supported = any(protocols[index] == wm_delete for index in range(count.value))
+finally:
+    x11.XFree(protocols)
+if not supported:
+    x11.XCloseDisplay(display)
+    stop(8)
+event = ClientMessage()
+event.type = 33
+event.send_event = 1
+event.display = display
+event.window = window
+event.message_type = wm_protocols
+event.format = 32
+event.data[0] = wm_delete
+event.data[1] = 0
+event_mask = 0xC0000
+if not x11.XSendEvent(display, window, 0, event_mask, C.byref(event)):
+    x11.XCloseDisplay(display)
+    stop(9)
+x11.XFlush(display)
+x11.XCloseDisplay(display)
+"#;
 
 pub(crate) fn hidden_command<S: AsRef<OsStr>>(program: S) -> Command {
     #[cfg(windows)]
@@ -362,13 +467,24 @@ impl ManagerState {
 
     fn cleanup(&mut self, id: &str) {
         if let Some(mut child) = self.children.remove(id) {
+            let cleanup_command = format!(
+                concat!(
+                    "env DISPLAY={display} XAUTHORITY={auth} python3 -c {script} {window} {class_name} >/dev/null 2>&1 || true; ",
+                    "if [ -r /proc/{pid}/comm ] && [ \"$(tr -d '\\0' </proc/{pid}/comm 2>/dev/null)\" = x11vnc ]; then ",
+                    "kill -TERM {pid} 2>/dev/null || true; ",
+                    "for i in 1 2 3 4 5 6 7 8 9 10; do kill -0 {pid} 2>/dev/null || exit 0; sleep 0.1; done; ",
+                    "kill -KILL {pid} 2>/dev/null || true; fi"
+                ),
+                display = shell_quote(&self.profile.display()),
+                auth = shell_quote(&self.profile.xauthority()),
+                script = shell_quote(CLOSE_X11_WINDOW_PYTHON),
+                window = shell_quote(&child.info.window_id),
+                class_name = shell_quote(&self.profile.class_name()),
+                pid = child.remote_pid,
+            );
             let _ = child.tunnel.kill();
             let _ = child.tunnel.wait();
-            let _ = run_ssh(
-                &self.profile,
-                &format!("kill {}", child.remote_pid),
-                Duration::from_secs(5),
-            );
+            let _ = run_ssh(&self.profile, &cleanup_command, Duration::from_secs(5));
         }
     }
 
@@ -430,6 +546,16 @@ impl ManagerRuntime {
             shutdown,
             join: Some(join),
         })
+    }
+
+    pub fn cleanup_session(&self, id: &str) {
+        let state = Arc::clone(&self.state);
+        let id = id.to_string();
+        thread::spawn(move || {
+            if let Ok(mut state) = state.lock() {
+                state.cleanup(&id);
+            }
+        });
     }
 
     pub fn stop(&mut self) {

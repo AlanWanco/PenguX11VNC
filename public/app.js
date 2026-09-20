@@ -300,7 +300,10 @@ async function cacheVncPassword(password) {
   const response = await api(credentialCachePath(), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ password }),
+    body: JSON.stringify({
+      password,
+      persist: $("password-remember").checked,
+    }),
   });
   if (!response.ok) throw new Error("本次运行无法缓存 VNC 密码");
   return response.json().catch(() => ({}));
@@ -628,7 +631,7 @@ function isTauriShell() {
 }
 async function createTauriChildWindow(info, url) {
   const WebviewWindow = tauriWebviewWindowClass();
-  const label = `qq-child-${info.id.replace(/^0x/i, "")}`;
+  const label = `qq-child-${info.id.replace(/^0x/i, "").toLowerCase()}`;
   const child = new WebviewWindow(label, {
     url: new URL(url, location.origin).toString(),
     title: `PenguX11VNC · QQ 子窗口 · ${info.id}`,
@@ -889,16 +892,7 @@ async function connect(prepare = true) {
     });
     client.addEventListener("disconnect", (event) => {
       connected = false;
-      if (isMainSession) {
-        for (const entry of window.openedChildWindows?.values() || []) {
-          try {
-            Promise.resolve(entry.window.close()).catch(() => {});
-          } catch {
-            /* Already closed. */
-          }
-        }
-        window.openedChildWindows?.clear();
-      }
+      if (isMainSession) void cleanupOpenedChildSessions();
       stopClipboardSync();
       stopChildMonitor();
       rfb = undefined;
@@ -983,13 +977,32 @@ function startRecoveryMonitor() {
   };
   recoveryTimer = setTimeout(tick, 5000);
 }
+async function cleanupOpenedChildSessions() {
+  const entries = [...(window.openedChildWindows?.entries() || [])];
+  for (const [key, entry] of entries) {
+    try {
+      await Promise.resolve(entry.window.close());
+    } catch {
+      // The native/browser child may already be closing.
+    }
+    await cleanupChildEntry(key, entry);
+  }
+}
 async function stopMainConnection() {
   connectEpoch++;
   $("connect").disabled = false;
   connectionWanted = false;
   recoveryEpoch++;
   clearTimeout(recoveryTimer);
+  const childrenCleanup = isMainSession
+    ? cleanupOpenedChildSessions()
+    : Promise.resolve(
+        api(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+          method: "DELETE",
+        }).catch(() => {}),
+      );
   rfb?.disconnect();
+  await childrenCleanup;
   if (setupAvailable) await api("/api/main/stop", { method: "POST" });
   setInteractive();
 }

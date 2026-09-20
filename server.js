@@ -525,17 +525,30 @@ export async function startServer({
       }).catch(() => {});
       return;
     }
+    if (session.windowId) {
+      const closeWindow = `if command -v xdotool >/dev/null 2>&1; then xdotool windowclose --sync ${shellQuote(session.windowId)}; elif command -v wmctrl >/dev/null 2>&1; then wmctrl -ic ${shellQuote(session.windowId)}; fi`;
+      const env = `env DISPLAY=${shellQuote(profile.window.display)} XAUTHORITY=${shellQuote(profile.window.xauthority)}`;
+      await runSsh(
+        profile,
+        `${env} sh -c ${shellQuote(closeWindow)}`,
+        5000,
+      ).catch(() => {});
+    }
     if (session.tunnel && !session.tunnel.killed)
       session.tunnel.kill("SIGTERM");
     if (session.remotePid)
-      await runSsh(profile, `kill ${session.remotePid}`, 5000).catch(() => {});
+      await runSsh(
+        profile,
+        `if [ -r /proc/${session.remotePid}/comm ] && [ "$(tr -d '\\n' </proc/${session.remotePid}/comm 2>/dev/null)" = x11vnc ]; then kill -TERM ${session.remotePid} 2>/dev/null || true; sleep 0.2; kill -KILL ${session.remotePid} 2>/dev/null || true; fi`,
+        5000,
+      ).catch(() => {});
   }
   const sessionSweep = setInterval(() => {
-    const cutoff = Date.now() - 10000;
+    const cutoff = Date.now() - 3000;
     for (const session of childProcesses.values()) {
       if (session.lastSeen < cutoff) void cleanupSession(session);
     }
-  }, 2000);
+  }, 500);
   sessionSweep.unref?.();
 
   const server = http.createServer(async (req, res) => {
