@@ -14,6 +14,9 @@ let childTimer;
 let childPollInFlight = false;
 const childPollIntervalMs = 1000;
 let clipboardTimer;
+let clipboardPasteShortcutInFlight = false;
+let replayingClipboardPasteShortcut = false;
+let remoteFilePasteReady = false;
 let token;
 let setupAvailable = false;
 let connectionWanted = false;
@@ -783,10 +786,96 @@ function formatFileSize(bytes) {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
   return `${(bytes / 1024 / 1024).toFixed(1)} MiB`;
 }
-async function sendClipboardFiles() {
+function clipboardFileErrorMessage(error) {
+  return error?.message || String(error);
+}
+function isNoFileClipboardError(error) {
+  const message = clipboardFileErrorMessage(error);
+  return (
+    message.includes("本机剪贴板中没有可用文件") ||
+    message.includes("剪贴板中没有文件")
+  );
+}
+function reportClipboardFileError(error) {
+  const message = clipboardFileErrorMessage(error);
+  $("clipboard-files-status").textContent = `文件剪贴板失败：${message}`;
+  toast(`文件剪贴板失败：${message}`);
+}
+function isViewerPasteShortcut(event) {
+  if (
+    !isTauriShell() ||
+    !connected ||
+    settings.viewOnly ||
+    replayingClipboardPasteShortcut ||
+    event.repeat ||
+    event.altKey ||
+    (!event.ctrlKey && !event.metaKey) ||
+    String(event.key).toLowerCase() !== "v"
+  )
+    return false;
+  const target = event.target instanceof Element ? event.target : undefined;
+  if (
+    !target?.closest("#screen") ||
+    target.closest("input, textarea, select, [contenteditable='true']")
+  )
+    return false;
+  if (remoteFilePasteReady) {
+    // The previous shortcut uploaded the local files. Let the user's next
+    // Ctrl+V reach QQ so it pastes the already-prepared remote files.
+    remoteFilePasteReady = false;
+    return false;
+  }
+  return true;
+}
+function replayClipboardPasteShortcut(event) {
+  const canvas = $("screen").querySelector("canvas");
+  if (!canvas) return;
+  replayingClipboardPasteShortcut = true;
+  const init = {
+    bubbles: true,
+    cancelable: true,
+    key: "v",
+    code: "KeyV",
+    location: event.location,
+    ctrlKey: event.ctrlKey,
+    altKey: event.altKey,
+    shiftKey: event.shiftKey,
+    metaKey: event.metaKey,
+  };
+  try {
+    canvas.dispatchEvent(new KeyboardEvent("keydown", init));
+    canvas.dispatchEvent(new KeyboardEvent("keyup", init));
+  } finally {
+    replayingClipboardPasteShortcut = false;
+  }
+}
+async function handleViewerPasteShortcut(event) {
+  if (!isViewerPasteShortcut(event)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  if (clipboardPasteShortcutInFlight) return;
+  clipboardPasteShortcutInFlight = true;
+  try {
+    let files;
+    try {
+      files = await tauriInvoke("read_clipboard_files");
+    } catch (error) {
+      if (isNoFileClipboardError(error)) {
+        replayClipboardPasteShortcut(event);
+      } else {
+        reportClipboardFileError(error);
+      }
+      return;
+    }
+    await sendClipboardFiles(files);
+  } finally {
+    clipboardPasteShortcutInFlight = false;
+  }
+}
+async function sendClipboardFiles(preloadedFiles) {
   const status = $("clipboard-files-status");
   try {
-    const files = await tauriInvoke("read_clipboard_files");
+    const files = preloadedFiles ?? (await tauriInvoke("read_clipboard_files"));
     if (!Array.isArray(files) || files.length === 0) {
       status.textContent = "本机剪贴板中没有文件。";
       return;
@@ -801,19 +890,20 @@ async function sendClipboardFiles() {
       !window.confirm(
         `将 ${files.length} 个文件（${formatFileSize(total)}）上传到远端 Downloads？\n\n${summary}\n\n上传后远端 Linux 剪贴板会包含这些文件；不会自动发送 QQ 消息。`,
       )
-    )
+    ) {
+      status.textContent = "已取消文件上传。";
       return;
+    }
     status.textContent = `正在上传 ${files.length} 个文件（${formatFileSize(total)}），请稍候……`;
     const result = await tauriInvoke("upload_clipboard_files", {
       paths: files.map((file) => file.path),
     });
     const names = result.files?.map((file) => file.name).join("、") || summary;
     status.textContent = `已上传到远端 Downloads：${names}。请在 QQ 中手动粘贴。`;
+    remoteFilePasteReady = true;
     toast("文件已上传并写入远端 Linux 文件剪贴板，请在 QQ 中按 Ctrl+V。 ");
   } catch (error) {
-    const message = error?.message || String(error);
-    status.textContent = `文件剪贴板失败：${message}`;
-    toast(`文件剪贴板失败：${message}`);
+    reportClipboardFileError(error);
   } finally {
     setInteractive();
   }
@@ -912,6 +1002,7 @@ async function connect(prepare = true) {
     });
     client.addEventListener("disconnect", (event) => {
       connected = false;
+      remoteFilePasteReady = false;
       if (isMainSession) void cleanupOpenedChildSessions();
       stopClipboardSync();
       stopChildMonitor();
@@ -1188,6 +1279,7 @@ function cancelPassword() {
 }
 $("password-cancel").addEventListener("click", cancelPassword);
 $("password-dialog").addEventListener("cancel", cancelPassword);
+document.addEventListener("keydown", handleViewerPasteShortcut, true);
 $("send-clipboard-files").addEventListener("click", () => {
   if (!connected || settings.viewOnly || !isTauriShell()) return;
   $("send-clipboard-files").disabled = true;
