@@ -16,7 +16,7 @@ const childPollIntervalMs = 1000;
 let clipboardTimer;
 let clipboardPasteShortcutInFlight = false;
 let replayingClipboardPasteShortcut = false;
-let remoteFilePasteReady = false;
+let remoteFilePasteSignature;
 let token;
 let setupAvailable = false;
 let connectionWanted = false;
@@ -786,6 +786,15 @@ function formatFileSize(bytes) {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
   return `${(bytes / 1024 / 1024).toFixed(1)} MiB`;
 }
+function clipboardFilesSignature(files) {
+  return JSON.stringify(
+    files.map((file) => [
+      String(file.path || ""),
+      String(file.name || ""),
+      Number(file.size) || 0,
+    ]),
+  );
+}
 function clipboardFileErrorMessage(error) {
   return error?.message || String(error);
 }
@@ -819,12 +828,6 @@ function isViewerPasteShortcut(event) {
     target.closest("input, textarea, select, [contenteditable='true']")
   )
     return false;
-  if (remoteFilePasteReady) {
-    // The previous shortcut uploaded the local files. Let the user's next
-    // Ctrl+V reach QQ so it pastes the already-prepared remote files.
-    remoteFilePasteReady = false;
-    return false;
-  }
   return true;
 }
 function replayClipboardPasteShortcut(event) {
@@ -861,10 +864,19 @@ async function handleViewerPasteShortcut(event) {
       files = await tauriInvoke("read_clipboard_files");
     } catch (error) {
       if (isNoFileClipboardError(error)) {
+        remoteFilePasteSignature = undefined;
         replayClipboardPasteShortcut(event);
       } else {
         reportClipboardFileError(error);
       }
+      return;
+    }
+    if (
+      Array.isArray(files) &&
+      remoteFilePasteSignature &&
+      clipboardFilesSignature(files) === remoteFilePasteSignature
+    ) {
+      replayClipboardPasteShortcut(event);
       return;
     }
     await sendClipboardFiles(files);
@@ -900,7 +912,7 @@ async function sendClipboardFiles(preloadedFiles) {
     });
     const names = result.files?.map((file) => file.name).join("、") || summary;
     status.textContent = `已上传到远端 Downloads：${names}。请在 QQ 中手动粘贴。`;
-    remoteFilePasteReady = true;
+    remoteFilePasteSignature = clipboardFilesSignature(files);
     toast("文件已上传并写入远端 Linux 文件剪贴板，请在 QQ 中按 Ctrl+V。 ");
   } catch (error) {
     reportClipboardFileError(error);
@@ -1002,7 +1014,7 @@ async function connect(prepare = true) {
     });
     client.addEventListener("disconnect", (event) => {
       connected = false;
-      remoteFilePasteReady = false;
+      remoteFilePasteSignature = undefined;
       if (isMainSession) void cleanupOpenedChildSessions();
       stopClipboardSync();
       stopChildMonitor();
