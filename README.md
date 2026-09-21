@@ -51,7 +51,7 @@ npm run tauri:dev
 - 原有 Ctrl+Space、`[` / `]`、F11 仍交给远端 Fcitx/Rime。浏览器或 macOS 抢占的快捷键需另行处理。
 - 「只看画面」可禁止本客户端发送键盘、鼠标和剪贴板。
 - 剪贴板**默认不自动同步**；设置中可选开启双向同步，也可手动提交文本。若服务器没有协商 Unicode 扩展，会阻止中文传送，避免出现问号；不会自动粘贴或发送 QQ 消息。
-- Tauri 设置中的「上传剪贴板文件到远端 Downloads」只在点击后读取本机文件剪贴板，单次文件合计限制 50 MiB。应用使用 SCP 上传到远端 `xdg-user-dir DOWNLOAD`（没有该命令时为 `~/Downloads`），再写入远端 `text/uri-list` 文件剪贴板；请在 QQ 中手动按 `Ctrl+V`，不会自动发送消息。远端优先使用 `xclip`（兼容 X11/XWayland QQ），其次 `wl-copy`，都没有时使用 Python/X11 兼容实现。
+- Tauri 设置中的「上传剪贴板文件到远端 Downloads」只在点击后读取本机文件剪贴板，单次文件合计限制 50 MiB。应用使用 SCP 上传到远端 `xdg-user-dir DOWNLOAD`（没有该命令时为 `~/Downloads`），再写入远端文件剪贴板；请在 QQ 中手动按 `Ctrl+V`，不会自动发送消息。针对 X11/XWayland QQ，远端先用 `xclip` 写入 `text/uri-list`，并在有 `python3` 时补充 GNOME/KDE 多 MIME 格式；`xclip` 不可用时再尝试 `wl-copy`，最后使用 Python/X11 兼容实现。
 - 工具栏不再提供额外的收起按钮或悬浮球，避免改变 VNC 画面尺寸和缩放状态。点击设置面板外的空白区域会关闭设置；关闭 Tauri 系统标题栏后，顶部保留细栏，可点击右侧按钮展开控制栏。关闭按钮固定在顶部栏最右侧。
 - 默认推荐 Tauri 2 外壳；旧 Chrome 回退入口使用独立 app 窗口和 `.runtime/chrome-profile`，不改个人 Chrome 配置。迁移进度见 [TAURI-MIGRATION.md](TAURI-MIGRATION.md)。
 - 可见的 QQ 同类子窗口可由配置档自动发现，并为每个子窗口打开独立前端窗口；子窗口页面会自动连接，不再需要手动点「连接窗口」。子窗口继承主窗口的码率、帧率、滚轮、缩放、只读和剪贴板设置，主窗口修改后已打开的子窗口也会同步。枚举会递归 X11 窗口树并兼容 `QQ`/`Qq` 类名。隐藏或未映射的窗口不会捕获；Tauri Rust manager 负责 Linux 子窗口对应的远端 VNC、SSH 会话和自动清理。

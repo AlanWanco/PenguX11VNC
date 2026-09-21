@@ -41,7 +41,14 @@ class SelectionClear(C.Structure):
     ]
 
 class Event(C.Union):
-    _fields_ = [("type", C.c_int), ("request", SelectionRequest), ("clear", SelectionClear)]
+    # XNextEvent writes the complete 192-byte XEvent, not only the selected
+    # event view. Keep the union large enough to avoid corrupting ctypes state.
+    _fields_ = [
+        ("type", C.c_int),
+        ("request", SelectionRequest),
+        ("clear", SelectionClear),
+        ("padding", C.c_ubyte * 192),
+    ]
 
 x11 = C.CDLL(U.find_library("X11") or "libX11.so.6")
 x11.XOpenDisplay.argtypes = [C.c_char_p]
@@ -72,6 +79,8 @@ EVENT_SELECTION_NOTIFY = 31
 EVENT_SELECTION_CLEAR = 29
 
 payload = sys.argv[1].encode()
+gnome_payload = b"copy\n" + payload.replace(b"\r\n", b"\n")
+kde_cut_payload = b"0"
 display = x11.XOpenDisplay(None)
 if not display:
     raise SystemExit(2)
@@ -81,6 +90,12 @@ window = x11.XCreateSimpleWindow(display, root, 0, 0, 1, 1, 0, 0, 0)
 clipboard = x11.XInternAtom(display, b"CLIPBOARD", 0)
 targets = x11.XInternAtom(display, b"TARGETS", 0)
 uri = x11.XInternAtom(display, b"text/uri-list", 0)
+gnome = x11.XInternAtom(display, b"x-special/gnome-copied-files", 0)
+kde4 = x11.XInternAtom(display, b"application/x-kde4-urilist", 0)
+kde5 = x11.XInternAtom(display, b"application/x-kde5-urilist", 0)
+kde_cut = x11.XInternAtom(display, b"application/x-kde-cutselection", 0)
+text_plain = x11.XInternAtom(display, b"text/plain", 0)
+text_plain_utf8 = x11.XInternAtom(display, b"text/plain;charset=utf-8", 0)
 utf8 = x11.XInternAtom(display, b"UTF8_STRING", 0)
 text = x11.XInternAtom(display, b"TEXT", 0)
 string = x11.XInternAtom(display, b"STRING", 0)
@@ -102,11 +117,18 @@ try:
         request = event.request
         property_atom = request.property or request.target
         if request.target == targets:
-            values = (C.c_uint32 * 4)(uri, utf8, text, string)
-            x11.XChangeProperty(display, request.requestor, property_atom, atom, 32, PropModeReplace, values, 4)
-        elif request.target in (uri, utf8, text, string):
+            target_values = (targets, uri, gnome, kde4, kde5, kde_cut, text_plain, text_plain_utf8, utf8, text, string)
+            values = (C.c_ulong * len(target_values))(*target_values)
+            x11.XChangeProperty(display, request.requestor, property_atom, atom, 32, PropModeReplace, values, len(target_values))
+        elif request.target in (uri, kde4, kde5, text_plain, text_plain_utf8, utf8, text, string):
             data = C.create_string_buffer(payload)
             x11.XChangeProperty(display, request.requestor, property_atom, request.target, 8, PropModeReplace, data, len(payload))
+        elif request.target == gnome:
+            data = C.create_string_buffer(gnome_payload)
+            x11.XChangeProperty(display, request.requestor, property_atom, request.target, 8, PropModeReplace, data, len(gnome_payload))
+        elif request.target == kde_cut:
+            data = C.create_string_buffer(kde_cut_payload)
+            x11.XChangeProperty(display, request.requestor, property_atom, request.target, 8, PropModeReplace, data, len(kde_cut_payload))
         else:
             property_atom = 0
         response = Event()
@@ -862,7 +884,7 @@ fn set_remote_file_clipboard(profile: &Profile, paths: &[String]) -> io::Result<
         .join("\r\n");
     payload.push_str("\r\n");
     let command = format!(
-        "set -eu; export DISPLAY={display}; export XAUTHORITY={auth}; export XDG_RUNTIME_DIR=\"${{XDG_RUNTIME_DIR:-$(dirname -- \"$XAUTHORITY\")}}\"; export WAYLAND_DISPLAY=\"${{WAYLAND_DISPLAY:-wayland-0}}\"; payload={payload}; if command -v xclip >/dev/null 2>&1 && printf '%s' \"$payload\" | xclip -selection clipboard -t text/uri-list -i; then exit 0; fi; if command -v wl-copy >/dev/null 2>&1 && printf '%s' \"$payload\" | wl-copy --type text/uri-list; then exit 0; fi; if command -v python3 >/dev/null 2>&1; then nohup python3 -c {helper} \"$payload\" >/dev/null 2>&1 </dev/null & helper_pid=$!; sleep 0.2; if kill -0 \"$helper_pid\" 2>/dev/null; then exit 0; fi; fi; exit 127",
+        "set -eu; export DISPLAY={display}; export XAUTHORITY={auth}; export XDG_RUNTIME_DIR=\"${{XDG_RUNTIME_DIR:-$(dirname -- \"$XAUTHORITY\")}}\"; export WAYLAND_DISPLAY=\"${{WAYLAND_DISPLAY:-wayland-0}}\"; payload={payload}; if command -v xclip >/dev/null 2>&1 && printf '%s' \"$payload\" | xclip -selection clipboard -t text/uri-list -i; then if command -v python3 >/dev/null 2>&1; then nohup python3 -c {helper} \"$payload\" >/dev/null 2>&1 </dev/null & helper_pid=$!; sleep 0.2; if kill -0 \"$helper_pid\" 2>/dev/null; then exit 0; fi; fi; exit 0; fi; if command -v wl-copy >/dev/null 2>&1 && printf '%s' \"$payload\" | wl-copy --type text/uri-list; then if command -v python3 >/dev/null 2>&1; then nohup python3 -c {helper} \"$payload\" >/dev/null 2>&1 </dev/null & helper_pid=$!; sleep 0.2; if kill -0 \"$helper_pid\" 2>/dev/null; then exit 0; fi; fi; exit 0; fi; if command -v python3 >/dev/null 2>&1; then nohup python3 -c {helper} \"$payload\" >/dev/null 2>&1 </dev/null & helper_pid=$!; sleep 0.2; if kill -0 \"$helper_pid\" 2>/dev/null; then exit 0; fi; fi; exit 127",
         display = shell_quote(&profile.display()),
         auth = shell_quote(&profile.xauthority()),
         payload = shell_quote(&payload),
@@ -1653,6 +1675,24 @@ mod clipboard_tests {
             percent_encode_file_uri("/home/user/报告 1#.txt"),
             "file:///home/user/%E6%8A%A5%E5%91%8A%201%23.txt"
         );
+    }
+
+    #[test]
+    fn x11_helper_advertises_common_file_clipboard_targets() {
+        for target in [
+            "text/uri-list",
+            "x-special/gnome-copied-files",
+            "application/x-kde4-urilist",
+            "application/x-kde5-urilist",
+            "application/x-kde-cutselection",
+        ] {
+            assert!(
+                FILE_CLIPBOARD_X11_PYTHON.contains(target),
+                "missing X11 clipboard target: {target}"
+            );
+        }
+        assert!(FILE_CLIPBOARD_X11_PYTHON.contains("gnome_payload = b\"copy\\n\""));
+        assert!(FILE_CLIPBOARD_X11_PYTHON.contains("kde_cut_payload = b\"0\""));
     }
 
     #[test]
