@@ -705,12 +705,28 @@ export async function startServer({
         if (!url.pathname.startsWith("/api/setup/")) delete data.profile;
         return json(res, 200, data);
       }
+      const activateMatch = url.pathname.match(
+        /^\/api\/sessions\/(main|window-[0-9a-f]+)\/activate$/i,
+      );
+      if (activateMatch && req.method === "POST") {
+        const id = activateMatch[1];
+        const session = getSession(id);
+        if (!session) return json(res, 404, { error: "session-not-found" });
+        if (!rustManager)
+          return json(res, 501, { error: "requires-managed-session" });
+        const result = await managerRequest(
+          rustManager,
+          `/sessions/${encodeURIComponent(id)}/activate`,
+          { method: "POST" },
+        );
+        return json(res, 200, result);
+      }
       if (url.pathname === "/api/status") {
         const session = getSession(sessionId);
         return session
           ? json(res, 200, {
               app: "PenguX11VNC",
-              version: "0.1.0",
+              version: "0.1.1",
               profile: profile.id,
               session: publicSession(session),
               clipboardSync: profile.clipboard.sync,

@@ -469,6 +469,12 @@ pub struct WindowInfo {
     pub y: i32,
     pub width: u32,
     pub height: u32,
+    #[serde(default, skip_serializing)]
+    pub pid: Option<u64>,
+    #[serde(default, skip_serializing)]
+    pub start: Option<String>,
+    #[serde(default, skip_serializing)]
+    pub exe: Option<String>,
 }
 
 pub const CLIPBOARD_FILE_LIMIT: u64 = 50 * 1024 * 1024;
@@ -621,6 +627,42 @@ impl ManagerState {
         if let Ok(entry) = self.credential_entry() {
             let _ = entry.delete_credential();
         }
+    }
+
+    fn activate(&mut self, session_id: &str) -> io::Result<Value> {
+        if session_id == "main" && self.onboarding.activate_main()? {
+            return Ok(json!({"ok": true, "managed": true}));
+        }
+        let target = if session_id == "main" {
+            json!({
+                "id": self.profile.window_id(),
+                "display": self.profile.display(),
+                "xauthority": self.profile.xauthority(),
+                "className": self.profile.class_name(),
+            })
+        } else {
+            let child = self
+                .children
+                .get(session_id)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "QQ 子窗口会话不存在"))?;
+            let mut target = json!({
+                "id": child.info.window_id.clone(),
+                "display": self.profile.display(),
+                "xauthority": self.profile.xauthority(),
+                "className": self.profile.class_name(),
+            });
+            if let Some(pid) = child.info.geometry.pid {
+                target["pid"] = json!(pid);
+            }
+            if let Some(start) = &child.info.geometry.start {
+                target["start"] = json!(start);
+            }
+            if let Some(exe) = &child.info.geometry.exe {
+                target["exe"] = json!(exe);
+            }
+            target
+        };
+        onboarding::activate_remote(&self.profile, &target)
     }
 
     fn list_windows(&mut self) -> io::Result<Vec<WindowInfo>> {
@@ -1686,6 +1728,16 @@ fn handle_request(mut stream: TcpStream, state: Arc<Mutex<ManagerState>>, token:
                         .open_child(id)
                         .map(|session| json!({"session": session}))
                 })
+        }
+        _ if method == "POST" && path.starts_with("/sessions/") && path.ends_with("/activate") => {
+            let id = path
+                .strip_prefix("/sessions/")
+                .and_then(|value| value.strip_suffix("/activate"))
+                .unwrap_or_default();
+            state
+                .lock()
+                .map_err(|_| io::Error::other("manager locked"))
+                .and_then(|mut manager| manager.activate(id))
         }
         _ if method == "DELETE" && path.starts_with("/sessions/") => {
             let id = path.strip_prefix("/sessions/").unwrap_or_default();

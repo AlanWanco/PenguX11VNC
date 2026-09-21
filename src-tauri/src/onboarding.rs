@@ -54,6 +54,21 @@ impl Onboarding {
     pub fn stop(&mut self) {
         self.live.take();
     }
+
+    pub(super) fn activate_main(&mut self) -> io::Result<bool> {
+        let Some(live) = self.live.as_mut() else {
+            return Ok(false);
+        };
+        let Some(remote) = live.remote.as_mut() else {
+            return Err(io::Error::other("远端 QQ 管理通道不可用"));
+        };
+        let Some(stdin) = remote.stdin.as_mut() else {
+            return Err(io::Error::other("远端 QQ 管理通道已关闭"));
+        };
+        stdin.write_all(b"{\"action\":\"activate\"}\n")?;
+        stdin.flush()?;
+        Ok(true)
+    }
 }
 
 fn config_path() -> PathBuf {
@@ -163,6 +178,15 @@ fn probe_command(action: &str, options: &Value) -> String {
         shell_quote(action),
         shell_quote(&options.to_string())
     )
+}
+
+pub(super) fn activate_remote(profile: &Profile, target: &Value) -> io::Result<Value> {
+    let output = run_ssh(
+        profile,
+        &probe_command("activate", &json!({"target": target})),
+        Duration::from_secs(7),
+    )?;
+    serde_json::from_str(&output).map_err(|_| io::Error::other("远端窗口激活响应无效"))
 }
 
 fn probe(profile: &Profile) -> io::Result<Value> {
@@ -498,6 +522,9 @@ pub(super) fn fallback_windows(profile: &Profile) -> io::Result<Vec<WindowInfo>>
                 y: 0,
                 width: w["width"].as_u64().unwrap_or(0) as u32,
                 height: w["height"].as_u64().unwrap_or(0) as u32,
+                pid: w["pid"].as_u64(),
+                start: w["start"].as_str().map(ToOwned::to_owned),
+                exe: w["exe"].as_str().map(ToOwned::to_owned),
             })
         })
         .collect()

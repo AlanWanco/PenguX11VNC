@@ -100,6 +100,13 @@ class X11:
             "XOpenDisplay": ([C.c_char_p], C.c_void_p),
             "XCloseDisplay": ([C.c_void_p], C.c_int),
             "XDefaultRootWindow": ([C.c_void_p], C.c_ulong),
+            "XRaiseWindow": ([C.c_void_p, C.c_ulong], C.c_int),
+            "XMapRaised": ([C.c_void_p, C.c_ulong], C.c_int),
+            "XSetInputFocus": (
+                [C.c_void_p, C.c_ulong, C.c_int, C.c_ulong],
+                C.c_int,
+            ),
+            "XFlush": ([C.c_void_p], C.c_int),
             "XInternAtom": ([C.c_void_p, C.c_char_p, C.c_int], C.c_ulong),
             "XGetWindowProperty": (
                 [
@@ -175,6 +182,73 @@ class X11:
         finally:
             if data.value:
                 self.lib.XFree(data)
+
+    def _target_window(self, target: dict) -> tuple[int, Attributes, bool]:
+        value = str(target.get("id") or "")
+        if not value.lower().startswith("0x"):
+            raise RuntimeError("invalid-window-id")
+        try:
+            window = int(value, 16)
+        except ValueError as error:
+            raise RuntimeError("invalid-window-id") from error
+        if window <= 0:
+            raise RuntimeError("invalid-window-id")
+        attrs = Attributes()
+        if not self.lib.XGetWindowAttributes(
+            self.display, window, C.byref(attrs)
+        ):
+            raise RuntimeError("window-unavailable")
+        hint = ClassHint()
+        if not self.lib.XGetClassHint(self.display, window, C.byref(hint)):
+            raise RuntimeError("window-class-unavailable")
+        try:
+            klass = (
+                C.string_at(hint.klass).decode(errors="replace")
+                if hint.klass
+                else ""
+            )
+        finally:
+            if hint.name:
+                self.lib.XFree(hint.name)
+            if hint.klass:
+                self.lib.XFree(hint.klass)
+        expected_class = str(target.get("className") or "QQ")
+        if klass.lower() != expected_class.lower():
+            raise RuntimeError("window-class-mismatch")
+        pids = self.property(window, "_NET_WM_PID")
+        identity = process_identity(pids[0]) if pids else None
+        if not identity:
+            raise RuntimeError("window-process-unavailable")
+        for key in ("pid", "start", "exe"):
+            expected = target.get(key)
+            if expected is not None and str(identity.get(key)) != str(expected):
+                raise RuntimeError("window-identity-mismatch")
+        hidden_atom = self.lib.XInternAtom(
+            self.display, b"_NET_WM_STATE_HIDDEN", 0
+        )
+        hidden = hidden_atom in self.property(window, "_NET_WM_STATE")
+        return window, attrs, hidden
+
+    def ensure_visible(self, target: dict) -> bool:
+        window, attrs, hidden = self._target_window(target)
+        if attrs.map_state == 2 and not hidden:
+            return False
+        self.lib.XMapRaised(self.display, window)
+        self.lib.XFlush(self.display)
+        return True
+
+    def activate(self, target: dict) -> bool:
+        window, attrs, hidden = self._target_window(target)
+        restored = attrs.map_state != 2 or hidden
+        if restored:
+            self.lib.XMapRaised(self.display, window)
+        else:
+            self.lib.XRaiseWindow(self.display, window)
+        # RevertToParent=2, CurrentTime=0. This is issued only after a local
+        # viewer focus/click or by the connection-owned visibility watchdog.
+        self.lib.XSetInputFocus(self.display, window, 2, 0)
+        self.lib.XFlush(self.display)
+        return restored
 
     def windows(self) -> list[dict]:
         root_window = self.lib.XDefaultRootWindow(self.display)
@@ -356,6 +430,22 @@ def same_window(expected: dict, actual: dict) -> bool:
     )
 
 
+def activate(options: dict) -> dict:
+    target = options.get("target") or options
+    if not isinstance(target, dict):
+        raise RuntimeError("invalid-target")
+    display = str(target.get("display") or "")
+    xauthority = str(target.get("xauthority") or "")
+    if not display.startswith(":") or not xauthority:
+        raise RuntimeError("invalid-display")
+    x11 = X11({"display": display, "xauthority": xauthority})
+    try:
+        restored = x11.activate(target)
+        return {"ok": True, "restored": restored, "id": target.get("id")}
+    finally:
+        x11.close()
+
+
 def serve(options: dict) -> None:
     def interrupted(_signal: int, _frame: object) -> None:
         raise KeyboardInterrupt
@@ -391,6 +481,7 @@ def serve(options: dict) -> None:
         "3.3",
         "-xwarppointer",
     ]
+    x11 = X11(target)
     child = subprocess.Popen(
         args,
         stdin=subprocess.DEVNULL,
@@ -400,15 +491,30 @@ def serve(options: dict) -> None:
     selector = selectors.DefaultSelector()
     selector.register(sys.stdin, selectors.EVENT_READ, "owner")
     selector.register(child.stdout, selectors.EVENT_READ, "vnc")
-    ready, buffer, deadline = False, b"", time.monotonic() + 10
+    ready, buffer = False, b""
+    owner_buffer = b""
+    deadline = time.monotonic() + 10
+    next_visibility_check = time.monotonic()
     try:
         while child.poll() is None:
             if not ready and time.monotonic() > deadline:
                 raise RuntimeError("vnc-start-timeout")
-            for key, _ in selector.select(1):
+            for key, _ in selector.select(0.5):
                 if key.data == "owner":
-                    if not os.read(sys.stdin.fileno(), 1024):
+                    data = os.read(sys.stdin.fileno(), 4096)
+                    if not data:
                         return
+                    owner_buffer = (owner_buffer + data)[-8192:]
+                    while b"\n" in owner_buffer:
+                        line, owner_buffer = owner_buffer.split(b"\n", 1)
+                        try:
+                            command = json.loads(line.decode())
+                            if command.get("action") == "activate":
+                                x11.activate(target)
+                            elif command.get("action") == "restore":
+                                x11.ensure_visible(target)
+                        except (UnicodeError, ValueError, KeyError, RuntimeError):
+                            pass
                 else:
                     data = os.read(child.stdout.fileno(), 4096)
                     if not data:
@@ -422,8 +528,15 @@ def serve(options: dict) -> None:
                                 raise RuntimeError("invalid-port")
                             ready = True
                             print(json.dumps({"port": port}), flush=True)
+            if time.monotonic() >= next_visibility_check:
+                try:
+                    x11.ensure_visible(target)
+                except RuntimeError:
+                    pass
+                next_visibility_check = time.monotonic() + 1
     finally:
         selector.close()
+        x11.close()
         if child.poll() is None:
             child.terminate()
             try:
@@ -438,6 +551,8 @@ def main() -> None:
         action, options = sys.argv[1], json.loads(sys.argv[2])
         if action == "probe":
             print(json.dumps(probe(options)), flush=True)
+        elif action == "activate":
+            print(json.dumps(activate(options)), flush=True)
         elif action == "serve":
             serve(options)
         else:

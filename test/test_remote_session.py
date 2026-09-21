@@ -77,6 +77,11 @@ class RemoteSessionTests(unittest.TestCase):
                 "scope := {'__name__': 'fixture'}); "
                 "scope['probe'] = lambda options: {'passwordReady': True, 'windows': [{'normal': True, 'transient': False}]}; "
                 "scope['same_window'] = lambda a, b: True; "
+                "scope['X11'] = type('FakeX11', (), {"
+                "'__init__': lambda self, target: None, "
+                "'ensure_visible': lambda self, target: False, "
+                "'activate': lambda self, target: False, "
+                "'close': lambda self: None}); "
                 "scope['serve']({'target': {'display': ':0', 'xauthority': '/tmp/test-auth', 'id': '0x10'}, "
                 "'passwordFile': '/tmp/test-pass'})"
             )

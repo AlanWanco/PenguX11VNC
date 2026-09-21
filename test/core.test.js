@@ -214,6 +214,7 @@ test("VNC credentials are shared in memory and cleared on request", async (t) =>
 test("closing a child VNC websocket reclaims its remote session", async (t) => {
   const managerToken = "test-manager-token";
   const deleted = [];
+  const activated = [];
   const manager = http.createServer((req, res) => {
     if (req.headers["x-pengux11vnc-token"] !== managerToken) {
       res.writeHead(403).end();
@@ -260,6 +261,11 @@ test("closing a child VNC websocket reclaims its remote session", async (t) => {
       res.end(JSON.stringify({ session }));
       return;
     }
+    if (req.url === "/sessions/window-2/activate" && req.method === "POST") {
+      activated.push(req.url);
+      res.end(JSON.stringify({ ok: true }));
+      return;
+    }
     if (req.url === "/sessions/window-2" && req.method === "DELETE") {
       deleted.push(req.url);
       res.end(JSON.stringify({ ok: true }));
@@ -297,6 +303,12 @@ test("closing a child VNC websocket reclaims its remote session", async (t) => {
   );
   assert.equal(opened.status, 200);
   const child = await opened.json();
+  const activatedResponse = await fetch(
+    `${app.origin}/api/sessions/${child.session.id}/activate`,
+    { method: "POST", headers },
+  );
+  assert.equal(activatedResponse.status, 200);
+  assert.deepEqual(activated, ["/sessions/window-2/activate"]);
   const ws = new WebSocket(
     `${app.origin.replace("http:", "ws:")}/vnc?session=${child.session.id}`,
     { headers: { Origin: app.origin, "X-PenguX11VNC-Token": app.token } },

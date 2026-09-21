@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "PenguX11VNC",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "identifier": "com.pengux11vnc.app",
   "build": {
     "frontendDist": "../public",

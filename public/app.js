@@ -14,6 +14,8 @@ let childTimer;
 let childPollInFlight = false;
 const childPollIntervalMs = 1000;
 let clipboardTimer;
+let remoteActivationTimer;
+let remoteActivationInFlight = false;
 let clipboardPasteShortcutInFlight = false;
 let replayingClipboardPasteShortcut = false;
 let remoteFilePasteSignature;
@@ -422,6 +424,33 @@ async function api(path, options = {}) {
   const headers = new Headers(options.headers || {});
   headers.set("X-PenguX11VNC-Token", token || "");
   return fetch(path, { ...options, headers });
+}
+async function activateRemoteWindow() {
+  if (
+    !isTauriShell() ||
+    !connected ||
+    settings.viewOnly ||
+    remoteActivationInFlight
+  )
+    return;
+  remoteActivationInFlight = true;
+  try {
+    await api(`/api/sessions/${encodeURIComponent(sessionId)}/activate`, {
+      method: "POST",
+    });
+  } catch {
+    // Activation is a convenience; it must not interrupt the VNC session.
+  } finally {
+    remoteActivationInFlight = false;
+  }
+}
+function requestRemoteWindowActivation() {
+  if (!isTauriShell() || !connected || settings.viewOnly) return;
+  clearTimeout(remoteActivationTimer);
+  remoteActivationTimer = setTimeout(() => {
+    remoteActivationTimer = undefined;
+    void activateRemoteWindow();
+  }, 60);
 }
 function credentialCachePath() {
   return `/api/credentials/cache?session=${encodeURIComponent(sessionId)}`;
@@ -1027,6 +1056,7 @@ async function connect(prepare = true) {
       geometry(true);
       startChildMonitor();
       if ($("settings").hidden) client.focus();
+      requestRemoteWindowActivation();
     });
     client.addEventListener("disconnect", (event) => {
       connected = false;
@@ -1034,6 +1064,8 @@ async function connect(prepare = true) {
       if (isMainSession) void cleanupOpenedChildSessions();
       stopClipboardSync();
       stopChildMonitor();
+      clearTimeout(remoteActivationTimer);
+      remoteActivationTimer = undefined;
       rfb = undefined;
       resizeObserver?.disconnect();
       frameObserver?.disconnect();
@@ -1253,6 +1285,14 @@ $("settings-toggle").addEventListener("click", () =>
   panel($("settings").hidden),
 );
 $("settings-close").addEventListener("click", () => panel(false));
+window.addEventListener("focus", requestRemoteWindowActivation);
+document.addEventListener(
+  "pointerdown",
+  (event) => {
+    if (event.target.closest("#screen")) requestRemoteWindowActivation();
+  },
+  true,
+);
 document.addEventListener("pointerdown", (event) => {
   const settingsPanel = $("settings");
   if (

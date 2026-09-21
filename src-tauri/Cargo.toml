@@ -1,6 +1,6 @@
 [package]
 name = "pengux11vnc"
-version = "0.1.0"
+version = "0.1.1"
 description = "PenguX11VNC desktop client"
 authors = ["PenguX11VNC contributors"]
 edition = "2021"
