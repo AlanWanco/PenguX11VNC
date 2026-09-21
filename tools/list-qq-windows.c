@@ -29,12 +29,13 @@ static void scan_tree(Display *display, Window root, Window window, Window main_
     XWindowAttributes attrs;
 
     if (window != root && window != main_window && is_class(display, window, wanted) &&
-        XGetWindowAttributes(display, window, &attrs) && attrs.map_state == IsViewable) {
+        XGetWindowAttributes(display, window, &attrs) && attrs.width >= 80 && attrs.height >= 60) {
         int root_x = 0, root_y = 0;
         Window child;
         XTranslateCoordinates(display, window, root, 0, 0, &root_x, &root_y, &child);
-        printf("{\"id\":\"0x%lx\",\"mapped\":true,\"depth\":%u,\"x\":%d,\"y\":%d,\"width\":%d,\"height\":%d}\n",
-               window, depth, root_x, root_y, attrs.width, attrs.height);
+        printf("{\"id\":\"0x%lx\",\"mapped\":%s,\"depth\":%u,\"x\":%d,\"y\":%d,\"width\":%d,\"height\":%d}\n",
+               window, attrs.map_state == IsViewable ? "true" : "false", depth, root_x, root_y,
+               attrs.width, attrs.height);
     }
 
     if (!XQueryTree(display, window, &returned_root, &parent, &children, &count)) return;

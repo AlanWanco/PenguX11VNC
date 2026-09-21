@@ -120,6 +120,33 @@ try {
       "Scaled pointer mismatch",
     );
   }
+  const originalCanvasStyle = await page
+    .locator("#screen canvas")
+    .getAttribute("style");
+  await page.evaluate(() => {
+    const canvas = document.querySelector("#screen canvas");
+    canvas.style.width = `${canvas.width * 0.61}px`;
+    canvas.style.height = `${canvas.height * 0.61}px`;
+  });
+  const resizedRect = await page.locator("#screen canvas").boundingBox();
+  await page.mouse.click(
+    resizedRect.x + resizedRect.width * 0.73,
+    resizedRect.y + resizedRect.height * 0.27,
+  );
+  await page.waitForTimeout(80);
+  const resizedClick = mock.events.pointers
+    .filter((event) => event.mask === 1)
+    .at(-1);
+  assert(
+    Math.abs(resizedClick.x - mock.width * 0.73) < 3 &&
+      Math.abs(resizedClick.y - mock.height * 0.27) < 3,
+    "Pointer mapping must follow the current canvas rectangle",
+  );
+  await page.evaluate((style) => {
+    const canvas = document.querySelector("#screen canvas");
+    if (style === null) canvas.removeAttribute("style");
+    else canvas.setAttribute("style", style);
+  }, originalCanvasStyle);
   const beforeKeys = mock.events.keys.length;
   await page.keyboard.press("F11");
   await page.keyboard.press("BracketLeft");

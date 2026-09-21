@@ -218,7 +218,7 @@ fn main_candidates(report: &Value) -> Vec<Value> {
         .as_array()
         .into_iter()
         .flatten()
-        .filter(|w| w["normal"] == true && w["transient"] == false)
+        .filter(|w| w["mapped"] != false && w["normal"] == true && w["transient"] == false)
         .cloned()
         .collect()
 }
@@ -516,7 +516,7 @@ pub(super) fn fallback_windows(profile: &Profile) -> io::Result<Vec<WindowInfo>>
         .map(|w| {
             Ok(WindowInfo {
                 id: w["id"].as_str().unwrap_or_default().to_owned(),
-                mapped: true,
+                mapped: w["mapped"] != false,
                 depth: 1,
                 x: 0,
                 y: 0,

@@ -24,6 +24,9 @@ let setupAvailable = false;
 let connectionWanted = false;
 let recoveryTimer;
 let recoveryEpoch = 0;
+let childRecoveryTimer;
+let childRecoveryEpoch = 0;
+let remoteWindowId;
 let sessionReady;
 const queryParameters = new URLSearchParams(location.search);
 const sessionId = queryParameters.get("session") || "main";
@@ -51,6 +54,7 @@ const defaultSettings = {
   wheel: 25,
   viewOnly: false,
   scale: "fit",
+  vncScale: null,
   bitrate: "lossless",
   frameRate: 30,
   clipboardSync: false,
@@ -67,11 +71,18 @@ try {
 } catch {
   settingsChannel = undefined;
 }
+function normalizeVncScale(value) {
+  const scale = Number(value);
+  return Number.isFinite(scale) && scale >= 0.05 && scale <= 1
+    ? Number(scale.toFixed(6))
+    : null;
+}
 function normalizeSettings(value = {}) {
   return {
     wheel: Math.max(5, Math.min(100, Number(value.wheel) || 25)),
     viewOnly: value.viewOnly === true,
     scale: value.scale === "actual" ? "actual" : "fit",
+    vncScale: normalizeVncScale(value.vncScale),
     bitrate: ["lossless", "high", "balanced", "low"].includes(value.bitrate)
       ? value.bitrate
       : "lossless",
@@ -91,6 +102,10 @@ try {
     "";
   hasSavedSettings = Boolean(savedText);
   settings = normalizeSettings(JSON.parse(savedText || "{}"));
+  if (isMainSession && !requestedTauriScale && settings.vncScale !== null) {
+    tauriVncScaleFactor = settings.vncScale;
+    preferredTauriScale = settings.vncScale;
+  }
   if (savedText && !localStorage.getItem(SETTINGS_MAIN_KEY))
     localStorage.setItem(SETTINGS_MAIN_KEY, savedText);
   localStorage.removeItem(SETTINGS_LEGACY_MAIN_KEY);
@@ -193,6 +208,17 @@ function syncSettingsControls() {
 function applySettings(value) {
   const previousClipboardSync = settings.clipboardSync;
   settings = normalizeSettings({ ...settings, ...value });
+  if (!isMainSession && isTauriShell() && settings.vncScale !== null) {
+    inheritedTauriScale = settings.vncScale;
+    preferredTauriScale = settings.vncScale;
+    tauriVncScaleFactor = settings.vncScale;
+    tauriVncResizeKey = undefined;
+  }
+  if (isMainSession && !requestedTauriScale && settings.vncScale !== null) {
+    tauriVncScaleFactor = settings.vncScale;
+    preferredTauriScale = settings.vncScale;
+    tauriVncResizeKey = undefined;
+  }
   syncSettingsControls();
   setInteractive();
   if (connected && previousClipboardSync !== settings.clipboardSync)
@@ -224,6 +250,7 @@ function setBitrate(mode, persist = true) {
 function scale(mode, persist = true) {
   const changed = settings.scale !== mode;
   settings.scale = mode;
+  if (mode === "actual") pendingTauriWindowSize = undefined;
   for (const id of ["fit", "actual"]) {
     $(id).classList.toggle("active", id === mode);
     $(id).setAttribute("aria-pressed", String(id === mode));
@@ -235,10 +262,26 @@ function scale(mode, persist = true) {
   if (isTauriShell() && (persist || changed || mode === "actual")) {
     const inheritedChildScale =
       !isMainSession && !persist ? inheritedTauriScale : undefined;
+    const savedMainScale =
+      isMainSession && !persist
+        ? normalizeVncScale(settings.vncScale)
+        : undefined;
     const forcedScale =
-      inheritedChildScale ?? (mode === "actual" ? 1 : undefined);
-    preferredTauriScale = forcedScale;
-    tauriVncScaleFactor = forcedScale;
+      inheritedChildScale ?? (mode === "actual" ? 1 : savedMainScale);
+    if (forcedScale !== undefined && forcedScale !== null) {
+      preferredTauriScale = forcedScale;
+      tauriVncScaleFactor = forcedScale;
+    } else if (isMainSession && persist && mode === "fit") {
+      preferredTauriScale = undefined;
+      tauriVncScaleFactor = undefined;
+    }
+    if (
+      isMainSession &&
+      persist &&
+      forcedScale !== undefined &&
+      forcedScale !== null
+    )
+      rememberMainTauriScale(forcedScale);
     tauriVncResizeKey = undefined;
   }
   if (persist) save();
@@ -266,8 +309,23 @@ function setTitlebarExpanded(expanded, resize = true) {
   }
 }
 let tauriVncResizeInFlight = false;
+let pendingTauriWindowSize;
 function currentTauriWindow() {
   return globalThis.__TAURI__?.window?.getCurrentWindow?.();
+}
+function refocusMainViewerAfterChildClose() {
+  if (!isMainSession || !isTauriShell()) return;
+  const current = currentTauriWindow();
+  setTimeout(() => {
+    void Promise.resolve(current?.setFocus?.())
+      .catch(() => {})
+      .finally(() => {
+        if (!connected) return;
+        rfb?.resetPointerState?.();
+        rfb?.focus({ preventScroll: true });
+        requestRemoteWindowActivation();
+      });
+  }, 0);
 }
 function tauriInvoke(command, args) {
   const invoke = globalThis.__TAURI__?.core?.invoke;
@@ -350,13 +408,32 @@ async function resizeTauriWindowToVnc() {
           availableWidth / canvas.width,
           availableHeight / canvas.height,
         );
+  const pendingScale =
+    isMainSession &&
+    settings.scale !== "actual" &&
+    pendingTauriWindowSize &&
+    pendingTauriWindowSize.width > 0 &&
+    pendingTauriWindowSize.height > 0
+      ? Math.max(
+          0.05,
+          Math.min(
+            1,
+            (pendingTauriWindowSize.width - chromeWidth) / canvas.width,
+            (pendingTauriWindowSize.height - chromeHeight) / canvas.height,
+          ),
+        )
+      : undefined;
   const scaleFactor =
-    preferredTauriScale ?? tauriVncScaleFactor ?? autoScaleFactor;
+    pendingScale ??
+    preferredTauriScale ??
+    tauriVncScaleFactor ??
+    autoScaleFactor;
   if (isMainSession) {
     const changed =
       tauriVncScaleFactor === undefined ||
       Math.abs(tauriVncScaleFactor - scaleFactor) > 0.001;
     tauriVncScaleFactor = scaleFactor;
+    if (pendingScale !== undefined) preferredTauriScale = scaleFactor;
     if (changed)
       settingsChannel?.postMessage({ tauriScale: tauriVncScaleFactor });
   }
@@ -378,12 +455,37 @@ async function resizeTauriWindowToVnc() {
           toast(`原生窗口比例锁定失败：${error?.message || error}`);
       });
     await current.setSize(tauriLogicalSize(innerWidth, innerHeight));
+    if (pendingScale !== undefined) {
+      rememberMainTauriScale(scaleFactor);
+      pendingTauriWindowSize = undefined;
+    }
   } catch (error) {
     tauriVncResizeKey = undefined;
     if (settingsReady)
       toast(`自动调整窗口失败：${error.message || "权限不足"}`);
   } finally {
     tauriVncResizeInFlight = false;
+  }
+}
+function rememberMainTauriScale(value) {
+  if (!isTauriShell() || !isMainSession) return;
+  const normalized = normalizeVncScale(value);
+  if (normalized === null) return;
+  const changed =
+    tauriVncScaleFactor === undefined ||
+    Math.abs(tauriVncScaleFactor - normalized) > 0.002;
+  tauriVncScaleFactor = normalized;
+  preferredTauriScale = normalized;
+  if (settings.vncScale === normalized && !changed) return;
+  settings.vncScale = normalized;
+  if (settingsReady) {
+    save();
+  } else {
+    try {
+      localStorage.setItem(SETTINGS_MAIN_KEY, JSON.stringify(settings));
+    } catch {
+      /* Storage is optional. */
+    }
   }
 }
 function syncMainTauriScaleFromViewport(canvas) {
@@ -404,8 +506,7 @@ function syncMainTauriScaleFromViewport(canvas) {
     Math.abs(tauriVncScaleFactor - normalized) < 0.002
   )
     return tauriVncScaleFactor;
-  tauriVncScaleFactor = normalized;
-  settingsChannel?.postMessage({ tauriScale: normalized });
+  rememberMainTauriScale(normalized);
   return normalized;
 }
 function geometry(resizeWindow = false) {
@@ -416,8 +517,16 @@ function geometry(resizeWindow = false) {
   );
   $("geometry").textContent =
     `${canvas.width} × ${canvas.height} · ${percent}% · ${bitrateLabels[settings.bitrate]} · ${frameRateLabels[settings.frameRate]}`;
-  if (resizeWindow) void resizeTauriWindowToVnc();
-  else syncMainTauriScaleFromViewport(canvas);
+  if (resizeWindow) {
+    if (
+      isTauriShell() &&
+      isMainSession &&
+      tauriVncScaleFactor === undefined &&
+      preferredTauriScale === undefined
+    )
+      syncMainTauriScaleFromViewport(canvas);
+    void resizeTauriWindowToVnc();
+  } else syncMainTauriScaleFromViewport(canvas);
   imeOverlay?.position();
 }
 async function api(path, options = {}) {
@@ -485,7 +594,10 @@ async function loadPersistentSettings() {
     settingsStamp = Number(data.updatedAt) || 0;
     if (!data.settings) return false;
     hasSavedSettings = true;
-    applySettings(data.settings);
+    const loaded = { ...data.settings };
+    if (loaded.vncScale == null && settings.vncScale !== null)
+      loaded.vncScale = settings.vncScale;
+    applySettings(loaded);
     return true;
   } catch {
     return false;
@@ -531,6 +643,7 @@ async function loadSessionInfo() {
         return;
       }
     }
+    remoteWindowId = data.session?.windowId;
     const title = data.session?.title || data.profile?.name || "QQ";
     document.title = `${title} · PenguX11VNC`;
     document.querySelector(".identity strong").lastElementChild.textContent =
@@ -666,22 +779,57 @@ async function createTauriChildWindow(info, url, scaleFactor = 1) {
   return child;
 }
 async function cleanupChildEntry(key, entry) {
-  if (!entry || entry.cleanupStarted) return;
-  entry.cleanupStarted = true;
-  if (window.openedChildWindows?.get(key) === entry)
-    window.openedChildWindows.delete(key);
-  await api(
-    `/api/sessions/${encodeURIComponent(entry.sessionId)}?session=main`,
-    { method: "DELETE" },
-  ).catch(() => {});
+  if (!entry || entry.cleanupInFlight) return false;
+  entry.cleanupInFlight = true;
+  try {
+    const response = await api(
+      `/api/sessions/${encodeURIComponent(entry.sessionId)}?session=main`,
+      { method: "DELETE" },
+    );
+    if (!response.ok && response.status !== 404)
+      throw new Error("子窗口会话清理失败");
+    if (window.openedChildWindows?.get(key) === entry) {
+      clearTimeout(entry.cleanupRetryTimer);
+      entry.cleanupRetryTimer = undefined;
+      window.openedChildWindows.delete(key);
+    }
+    return true;
+  } catch {
+    // Keep the entry so the next poll or reconnect can retry cleanup.
+    if (
+      window.openedChildWindows?.get(key) === entry &&
+      !entry.cleanupRetryTimer
+    ) {
+      entry.cleanupRetryTimer = setTimeout(() => {
+        entry.cleanupRetryTimer = undefined;
+        void cleanupChildEntry(key, entry);
+      }, 1000);
+    }
+    return false;
+  } finally {
+    entry.cleanupInFlight = false;
+  }
 }
 async function closeChildEntry(key, entry) {
+  if (!entry) return false;
   // Await native IPC before forgetting the window. A rejected close must leave
   // the entry available for the next poll; requesting close is not destruction.
-  if (!entry.closed) await entry.window.close();
+  if (!entry.closed && !entry.closeInFlight && !entry.closeRequested) {
+    entry.closeInFlight = true;
+    try {
+      entry.closeRequested = true;
+      await entry.window.close();
+    } catch (error) {
+      entry.closeRequested = false;
+      throw error;
+    } finally {
+      entry.closeInFlight = false;
+    }
+  }
   // Native close() acknowledges the request before Destroyed is delivered.
   // Keep tracking the window until that event; its handler performs cleanup.
-  if (!entry.tauri || entry.closed) await cleanupChildEntry(key, entry);
+  if (!entry.tauri || entry.closed) return cleanupChildEntry(key, entry);
+  return false;
 }
 function renderChildWindows(windows) {
   const list = $("child-list");
@@ -706,6 +854,7 @@ async function openChildWindow(info, userInitiated = false) {
   window.openedChildWindows ??= new Map();
   if (window.openedChildWindows.has(key)) return;
   let child;
+  let childSessionId;
   if (!tauri) {
     // Chrome requires this synchronous placeholder before the async SSH/API
     // request. Tauri creates a native WebviewWindow after the request instead.
@@ -728,6 +877,7 @@ async function openChildWindow(info, userInitiated = false) {
     );
     if (!opened.ok) throw new Error("子窗口 VNC 会话启动失败");
     const data = await opened.json();
+    childSessionId = data.session?.id;
     let childUrl = data.url;
     if (tauri && Number.isFinite(inheritedScale)) {
       const url = new URL(data.url, location.origin);
@@ -747,6 +897,8 @@ async function openChildWindow(info, userInitiated = false) {
     if (tauri) {
       const markClosed = () => {
         entry.closed = true;
+        entry.closeRequested = false;
+        refocusMainViewerAfterChildClose();
         void cleanupChildEntry(key, entry);
       };
       // Do not register onCloseRequested: Tauri then prevents the OS close
@@ -756,6 +908,11 @@ async function openChildWindow(info, userInitiated = false) {
     window.openedChildWindows.set(key, entry);
     renderChildWindows(window.lastChildWindows || []);
   } catch (error) {
+    if (childSessionId)
+      await api(
+        `/api/sessions/${encodeURIComponent(childSessionId)}?session=main`,
+        { method: "DELETE" },
+      ).catch(() => {});
     try {
       if (tauri) await child?.close();
       else child?.close();
@@ -779,24 +936,25 @@ async function pollChildWindows(force = false) {
     if (!response.ok) throw new Error("子窗口服务不可用");
     const data = await response.json();
     const windows = data.windows || [];
-    window.lastChildWindows = windows;
+    const visibleWindows = windows.filter((info) => info.mapped !== false);
+    window.lastChildWindows = visibleWindows;
     window.openedChildWindows ??= new Map();
-    const visibleKeys = new Set(windows.map((info) => info.id.toLowerCase()));
+    const knownKeys = new Set(windows.map((info) => info.id.toLowerCase()));
     for (const [key, entry] of window.openedChildWindows) {
       const childClosed =
         entry.closed === true ||
         (!entry.tauri && entry.window?.closed === true);
-      const remoteClosed = !visibleKeys.has(key);
+      const remoteClosed = !knownKeys.has(key);
       if (!childClosed && !remoteClosed) continue;
       if (childClosed) await cleanupChildEntry(key, entry);
       else await closeChildEntry(key, entry);
     }
-    $("child-status").textContent = windows.length
-      ? `发现 ${windows.length} 个 QQ 子窗口。`
+    $("child-status").textContent = visibleWindows.length
+      ? `发现 ${visibleWindows.length} 个 QQ 子窗口。`
       : "没有可见的 QQ 子窗口。";
-    renderChildWindows(windows);
+    renderChildWindows(visibleWindows);
     if (!settings.autoChildOpen) return;
-    for (const info of windows) {
+    for (const info of visibleWindows) {
       if (window.openedChildWindows.has(info.id.toLowerCase())) continue;
       await openChildWindow(info);
     }
@@ -976,6 +1134,11 @@ function setInteractive() {
 async function connect(prepare = true) {
   await sessionReady;
   if (rfb || connecting) return;
+  if (isTauriShell() && isMainSession) {
+    const width = Math.round(window.innerWidth);
+    const height = Math.round(window.innerHeight);
+    if (width > 0 && height > 0) pendingTauriWindowSize = { width, height };
+  }
   if (!token) {
     toast("请使用“启动 PenguX11VNC.command”打开，获取本次本地访问凭证。");
     return;
@@ -1032,6 +1195,7 @@ async function connect(prepare = true) {
       toast("VNC 认证失败，已停止自动重试。请检查密码后重新连接。");
     });
     client.addEventListener("connect", () => {
+      stopChildRecoveryMonitor();
       connected = true;
       state("已连接", "connected");
       if (isMainSession) {
@@ -1062,16 +1226,18 @@ async function connect(prepare = true) {
       connected = false;
       remoteFilePasteSignature = undefined;
       if (isMainSession) void cleanupOpenedChildSessions();
+      else if (!event.detail.clean) startChildRecoveryMonitor();
       stopClipboardSync();
       stopChildMonitor();
       clearTimeout(remoteActivationTimer);
       remoteActivationTimer = undefined;
+      if (!isMainSession && event.detail.clean) stopChildRecoveryMonitor();
       rfb = undefined;
       resizeObserver?.disconnect();
       frameObserver?.disconnect();
       tauriVncResizeKey = undefined;
       const resetScale = isMainSession
-        ? requestedTauriScale
+        ? (requestedTauriScale ?? normalizeVncScale(settings.vncScale))
         : (inheritedTauriScale ?? requestedTauriScale);
       tauriVncScaleFactor = resetScale;
       preferredTauriScale = resetScale;
@@ -1126,6 +1292,40 @@ function showRecoveryState(value) {
   state("等待远端", "disconnected");
   setInteractive();
 }
+function stopChildRecoveryMonitor() {
+  childRecoveryEpoch++;
+  clearTimeout(childRecoveryTimer);
+  childRecoveryTimer = undefined;
+}
+function startChildRecoveryMonitor() {
+  if (isMainSession || !isTauriShell() || !remoteWindowId) return;
+  stopChildRecoveryMonitor();
+  const epoch = childRecoveryEpoch;
+  const tick = async () => {
+    if (epoch !== childRecoveryEpoch || connected) return;
+    if (connecting) {
+      childRecoveryTimer = setTimeout(tick, 250);
+      return;
+    }
+    try {
+      await api(`/api/sessions/${encodeURIComponent(sessionId)}/activate`, {
+        method: "POST",
+      });
+      const response = await api(
+        `/api/windows/${encodeURIComponent(remoteWindowId)}/open?session=main`,
+        { method: "POST" },
+      );
+      if (!response.ok) throw new Error("子窗口 VNC 尚未恢复");
+      await connect(false);
+      if (rfb) return;
+    } catch {
+      // Keep retrying while the native child window remains open.
+    }
+    if (epoch === childRecoveryEpoch && !connected)
+      childRecoveryTimer = setTimeout(tick, 1000);
+  };
+  childRecoveryTimer = setTimeout(tick, 250);
+}
 function startRecoveryMonitor() {
   clearTimeout(recoveryTimer);
   const epoch = ++recoveryEpoch;
@@ -1170,6 +1370,7 @@ async function cleanupOpenedChildSessions() {
 }
 async function stopMainConnection() {
   connectEpoch++;
+  stopChildRecoveryMonitor();
   $("connect").disabled = false;
   connectionWanted = false;
   recoveryEpoch++;
@@ -1368,6 +1569,7 @@ window.addEventListener("pagehide", () => {
   connectionWanted = false;
   recoveryEpoch++;
   clearTimeout(recoveryTimer);
+  stopChildRecoveryMonitor();
   stopClipboardSync();
   stopChildMonitor();
   clearTimeout(settingsSyncTimer);

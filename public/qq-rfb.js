@@ -4,6 +4,7 @@
 // Private hooks are tied to noVNC 1.7.0. Do not edit node_modules.
 import RFB from "/vendor/core/rfb.js";
 import { clientToElement } from "/vendor/core/util/element.js";
+import { releaseCapture } from "/vendor/core/util/events.js";
 import { encodings as e } from "/vendor/core/encodings.js";
 import { WheelLimiter } from "./wheel.js";
 
@@ -122,6 +123,52 @@ export default class QQRFB extends RFB {
       // Upstream maps canvas coordinates through its own display scale exactly once.
       this._handleMouseButton(pos.x, pos.y, held | button);
       this._handleMouseButton(pos.x, pos.y, held);
+    }
+  }
+
+  resetPointerState() {
+    releaseCapture();
+    clearTimeout(this._mouseMoveTimer);
+    this._mouseMoveTimer = null;
+    this._mouseButtonMask = 0;
+    this._viewportDragging = false;
+    this._viewportHasMoved = false;
+  }
+
+  _sendMouse(x, y, mask) {
+    if (this._rfbConnectionState !== "connected" || this._viewOnly) return;
+    if (mask & 0x8000)
+      throw new Error(`Illegal mouse button mask (mask: ${mask})`);
+
+    // noVNC normally uses one cached Display scale for both axes. A native
+    // Tauri resize can briefly leave that cache one layout tick behind, which
+    // makes a click land at the old position. Derive the coordinates from the
+    // actual canvas rectangle and the current viewport on every event.
+    const bounds = this._canvas?.getBoundingClientRect?.();
+    const viewport = this._display?._viewportLoc;
+    const viewportWidth = viewport?.w || this._fbWidth;
+    const viewportHeight = viewport?.h || this._fbHeight;
+    let pointerX = x;
+    let pointerY = y;
+    if (
+      bounds?.width > 0 &&
+      bounds?.height > 0 &&
+      viewportWidth > 0 &&
+      viewportHeight > 0
+    ) {
+      pointerX = (x / bounds.width) * viewportWidth + (viewport?.x || 0);
+      pointerY = (y / bounds.height) * viewportHeight + (viewport?.y || 0);
+    }
+    const maxX = Math.max(0, (this._fbWidth || viewportWidth) - 1);
+    const maxY = Math.max(0, (this._fbHeight || viewportHeight) - 1);
+    pointerX = Math.max(0, Math.min(maxX, Math.round(pointerX)));
+    pointerY = Math.max(0, Math.min(maxY, Math.round(pointerY)));
+
+    const extendedMouseButtons = mask & 0x7f80;
+    if (this._extendedPointerEventSupported && extendedMouseButtons) {
+      RFB.messages.extendedPointerEvent(this._sock, pointerX, pointerY, mask);
+    } else {
+      RFB.messages.pointerEvent(this._sock, pointerX, pointerY, mask);
     }
   }
 

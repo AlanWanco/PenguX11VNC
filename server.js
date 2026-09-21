@@ -60,10 +60,15 @@ const legacyViewerSettingsPath = path.join(
   ".config/qq-window-viewer/settings.json",
 );
 function normalizeViewerSettings(value = {}) {
+  const vncScale = Number(value.vncScale);
   return {
     wheel: Math.max(5, Math.min(100, Number(value.wheel) || 25)),
     viewOnly: value.viewOnly === true,
     scale: value.scale === "actual" ? "actual" : "fit",
+    vncScale:
+      Number.isFinite(vncScale) && vncScale >= 0.05 && vncScale <= 1
+        ? vncScale
+        : null,
     bitrate: ["lossless", "high", "balanced", "low"].includes(value.bitrate)
       ? value.bitrate
       : "lossless",
@@ -437,7 +442,6 @@ export async function startServer({
         (item) =>
           /^0x[0-9a-f]+$/i.test(item.id) &&
           item.id.toLowerCase() !== profile.window.id.toLowerCase() &&
-          item.mapped === true &&
           Number(item.width) >= profile.children.minWidth &&
           Number(item.height) >= profile.children.minHeight,
       );
@@ -461,7 +465,7 @@ export async function startServer({
       (session) =>
         session.windowId.toLowerCase() === windowInfo.id.toLowerCase(),
     );
-    if (existing) return existing;
+    if (existing && !rustManager) return existing;
     if (rustManager) {
       const data = await managerRequest(
         rustManager,
@@ -469,6 +473,16 @@ export async function startServer({
         { method: "POST" },
       );
       const child = data.session;
+      if (existing) {
+        Object.assign(existing, {
+          targetPort: child.targetPort,
+          localPort: child.localPort,
+          remotePort: child.remotePort,
+          geometry: child.geometry,
+          lastSeen: Date.now(),
+        });
+        return existing;
+      }
       const session = {
         kind: "child",
         ...child,
@@ -559,20 +573,24 @@ export async function startServer({
     if (!session || session.id === "main" || session.viewerCount > 0) return;
     clearTimeout(session.viewerCleanupTimer);
     const lastSeen = session.lastSeen;
+    const delay = session.reconnectGrace ? 3000 : 250;
+    session.reconnectGrace = false;
+    session.reconnectGraceUntil = delay > 250 ? Date.now() + delay : 0;
     session.viewerCleanupTimer = setTimeout(() => {
-      if (
-        session.viewerCount === 0 &&
-        session.lastSeen === lastSeen &&
-        childProcesses.has(session.id)
-      )
-        void cleanupSession(session);
-    }, 250);
+      if (session.viewerCount !== 0 || !childProcesses.has(session.id)) return;
+      if (session.lastSeen !== lastSeen) {
+        scheduleUnviewedCleanup(session);
+        return;
+      }
+      void cleanupSession(session);
+    }, delay);
     session.viewerCleanupTimer.unref?.();
   }
   async function cleanupSession(session) {
     if (!session || session.id === "main" || !childProcesses.has(session.id))
       return;
     clearTimeout(session.viewerCleanupTimer);
+    session.reconnectGraceUntil = 0;
     sessions.delete(session.id);
     childProcesses.delete(session.id);
     if (rustManager) {
@@ -600,9 +618,14 @@ export async function startServer({
       ).catch(() => {});
   }
   const sessionSweep = setInterval(() => {
-    const cutoff = Date.now() - 3000;
+    const now = Date.now();
+    const cutoff = now - 3000;
     for (const session of childProcesses.values()) {
-      if (session.lastSeen < cutoff) void cleanupSession(session);
+      if (
+        session.lastSeen < cutoff &&
+        !(session.reconnectGraceUntil && session.reconnectGraceUntil > now)
+      )
+        void cleanupSession(session);
     }
   }, 500);
   sessionSweep.unref?.();
@@ -872,6 +895,8 @@ export async function startServer({
           (item) => item.id.toLowerCase() === openMatch[1].toLowerCase(),
         );
         if (!info) return json(res, 404, { error: "window-not-found" });
+        if (info.mapped !== true)
+          return json(res, 409, { error: "window-not-visible" });
         const child = await startChildSession(info);
         return json(res, 200, {
           url: `/?session=${encodeURIComponent(child.id)}#token=${token}`,
@@ -951,13 +976,17 @@ export async function startServer({
     wss.handleUpgrade(req, socket, head, (ws) => {
       ws.viewerSession = session.id;
       clearTimeout(session.viewerCleanupTimer);
+      session.reconnectGrace = false;
+      session.reconnectGraceUntil = 0;
       session.viewerCount = (session.viewerCount || 0) + 1;
       session.lastSeen = Date.now();
       let released = false;
-      const releaseViewer = () => {
+      const releaseViewer = (code) => {
         if (released) return;
         released = true;
         session.viewerCount = Math.max(0, (session.viewerCount || 1) - 1);
+        if (code !== 1000 && code !== 1001 && code !== 1005)
+          session.reconnectGrace = true;
         scheduleUnviewedCleanup(session);
       };
       ws.once("close", releaseViewer);
@@ -975,7 +1004,9 @@ export async function startServer({
       upstream.on("error", () => ws.close(1011, "VNC tunnel unavailable"));
       stream.on("error", () => upstream.destroy());
       ws.on("close", () => upstream.destroy());
-      upstream.on("close", () => ws.close());
+      upstream.on("close", () => {
+        if (ws.readyState === 1) ws.close(1011, "VNC tunnel closed");
+      });
     });
   });
   await new Promise((resolve, reject) => {

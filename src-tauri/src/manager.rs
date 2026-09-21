@@ -240,7 +240,7 @@ if actual_class.casefold() != expected_class:
     x11.XCloseDisplay(display)
     stop(5)
 attrs = Attributes()
-if not x11.XGetWindowAttributes(display, window, C.byref(attrs)) or attrs.map_state != 2:
+if not x11.XGetWindowAttributes(display, window, C.byref(attrs)):
     x11.XCloseDisplay(display)
     stop(6)
 wm_protocols = x11.XInternAtom(display, b"WM_PROTOCOLS", 0)
@@ -283,7 +283,7 @@ x11.XFlush(display)
 x11.XSync(display, 0)
 time.sleep(0.15)
 attrs = Attributes()
-if x11.XGetWindowAttributes(display, window, C.byref(attrs)) and attrs.map_state == 2:
+if x11.XGetWindowAttributes(display, window, C.byref(attrs)):
     destroy_window()
 x11.XCloseDisplay(display)
 "#;
@@ -687,14 +687,19 @@ impl ManagerState {
         let windows = discover_windows(&self.profile)?;
         let window = windows
             .into_iter()
-            .find(|window| window.id.eq_ignore_ascii_case(requested_id))
+            .find(|window| window.mapped && window.id.eq_ignore_ascii_case(requested_id))
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "QQ 子窗口不可见"))?;
         let session_id = format!(
             "window-{}",
             window.id.trim_start_matches("0x").to_lowercase()
         );
         if let Some(child) = self.children.get(&session_id) {
-            return Ok(child.info.clone());
+            if check_rfb(child.info.local_port) {
+                return Ok(child.info.clone());
+            }
+        }
+        if let Some(mut stale) = self.children.remove(&session_id) {
+            stop_remote_vnc(&self.profile, stale.remote_pid, &mut stale.tunnel);
         }
 
         let remote_port = self.find_remote_port()?;
@@ -713,11 +718,7 @@ impl ManagerState {
         if let Err(error) = wait_for_rfb(local_port, Duration::from_secs(8)) {
             let _ = tunnel.kill();
             let _ = tunnel.wait();
-            let _ = run_ssh(
-                &self.profile,
-                &format!("kill {remote_pid}"),
-                Duration::from_secs(5),
-            );
+            kill_remote_vnc_process(&self.profile, remote_pid);
             return Err(error);
         }
 
@@ -780,9 +781,8 @@ impl ManagerState {
                 class_name = shell_quote(&self.profile.class_name()),
                 pid = child.remote_pid,
             );
-            let _ = child.tunnel.kill();
-            let _ = child.tunnel.wait();
             let _ = run_ssh(&self.profile, &cleanup_command, Duration::from_secs(5));
+            stop_remote_vnc(&self.profile, child.remote_pid, &mut child.tunnel);
         }
     }
 
@@ -1244,7 +1244,6 @@ fn discover_windows(profile: &Profile) -> io::Result<Vec<WindowInfo>> {
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         if !valid_window_id(&window.id)
             || window.id.eq_ignore_ascii_case(&profile.window_id())
-            || !window.mapped
             || window.width < profile.min_width()
             || window.height < profile.min_height()
         {
@@ -1253,6 +1252,19 @@ fn discover_windows(profile: &Profile) -> io::Result<Vec<WindowInfo>> {
         windows.push(window);
     }
     Ok(windows)
+}
+
+fn kill_remote_vnc_process(profile: &Profile, remote_pid: u32) {
+    let command = format!(
+        "if [ -r /proc/{remote_pid}/comm ] && [ \"$(tr -d '\\0' </proc/{remote_pid}/comm 2>/dev/null)\" = x11vnc ]; then kill -TERM {remote_pid} 2>/dev/null || true; sleep 0.2; kill -KILL {remote_pid} 2>/dev/null || true; fi"
+    );
+    let _ = run_ssh(profile, &command, Duration::from_secs(5));
+}
+
+fn stop_remote_vnc(profile: &Profile, remote_pid: u32, tunnel: &mut Child) {
+    let _ = tunnel.kill();
+    let _ = tunnel.wait();
+    kill_remote_vnc_process(profile, remote_pid);
 }
 
 fn start_remote_vnc(profile: &Profile, window: &WindowInfo, remote_port: u16) -> io::Result<u32> {

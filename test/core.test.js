@@ -108,7 +108,12 @@ test("viewer settings persist for the main session", async (t) => {
     method: "PUT",
     headers,
     body: JSON.stringify({
-      settings: { wheel: 55, bitrate: "low", frameRate: 15 },
+      settings: {
+        wheel: 55,
+        bitrate: "low",
+        frameRate: 15,
+        vncScale: 0.61,
+      },
     }),
   });
   assert.equal(saved.status, 200);
@@ -120,6 +125,7 @@ test("viewer settings persist for the main session", async (t) => {
     wheel: 55,
     viewOnly: false,
     scale: "fit",
+    vncScale: 0.61,
     bitrate: "low",
     frameRate: 15,
     clipboardSync: false,

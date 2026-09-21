@@ -290,16 +290,12 @@ class X11:
                     self.lib.XGetTransientForHint(
                         self.display, window, C.byref(transient)
                     )
-                    if (
-                        identity
-                        and attrs.map_state == 2
-                        and attrs.width >= 80
-                        and attrs.height >= 60
-                    ):
+                    if identity and attrs.width >= 80 and attrs.height >= 60:
                         result.append(
                             {
                                 **identity,
                                 "id": hex(window),
+                                "mapped": attrs.map_state == 2,
                                 "width": attrs.width,
                                 "height": attrs.height,
                                 "className": klass,
@@ -455,7 +451,10 @@ def serve(options: dict) -> None:
     target, password = options["target"], options["passwordFile"]
     report = probe({"passwordFile": password})
     if not report["passwordReady"] or not any(
-        same_window(target, item) and item["normal"] and not item["transient"]
+        same_window(target, item)
+        and item.get("mapped", True)
+        and item["normal"]
+        and not item["transient"]
         for item in report["windows"]
     ):
         raise RuntimeError("target-unavailable")

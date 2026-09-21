@@ -11,6 +11,9 @@
 - [x] 可配置 VNC 请求帧率上限
 - [x] 可见 QQ 子窗口递归发现与独立会话
 - [x] 子窗口关闭状态实时回收与恢复
+- [ ] 加速子窗口监控：用持久 SSH 通道配合 X11 `SubstructureNotify` 事件驱动窗口变化，保留轮询作为兜底，避免每秒重新建立 SSH 并扫描窗口树
+- [ ] 子窗口偶发关闭失败：确认 QQ 窗口、X11 销毁、x11vnc、SSH 会话和本地 Tauri 窗口之间的竞态，避免关闭后 QQ 无法再次打开
+- [ ] 子窗口多次最小化/强制恢复后的断联：增加远端 VNC 存活检查、恢复和重连状态机
 - [ ] 子窗口真实弹窗场景回归测试（已验证 X11 helper 和独立 VNC；仍需用户现场确认自动弹窗流程）
 - [x] Tauri 首次连接向导与软件内 SSH/依赖/密码文件/窗口状态引导
 - [x] 只读预检、自动发现会话与 QQ 主窗口，多候选时人工选择
@@ -34,6 +37,9 @@
 - [x] 原生多窗口：Tauri 页面使用 WebviewWindow 创建 QQ 子窗口；Chrome 回退仍使用 window.open()
 - [x] WebView 承载 noVNC 画布；复用现有 `public/qq-rfb.js` 和 UI
 - [x] 主窗口根据 VNC 画面与 UI 外框原生锁定长宽比
+- [ ] 持久化连接/退出前最后有效的主窗口与子窗口 VNC 缩放比例
+- [ ] 未连接时调整窗口大小后，连接时按当前窗口可用宽高选择更小的等比缩放，不自动恢复到 1:1
+- [ ] 修复开启子窗口后偶发的鼠标坐标映射错误，核对 framebuffer、canvas 显示尺寸、DPI 和 Tauri 原生窗口尺寸变化
 - [x] Tauri 显式文件剪贴板上传：50 MiB 限制、SCP、远端 Downloads 与 `text/uri-list`
 
 - [x] GitHub Actions 未签名调试打包：macOS arm64 DMG、Linux amd64/arm64 AppImage、Windows amd64/arm64 NSIS 安装包
@@ -41,6 +47,11 @@
 - [x] 调试安装包内置对应目标架构 Node.js（Tauri 仍使用 Node HTTP/WebSocket 过渡 bridge；源码开发仍需 Node.js）
 - [ ] Windows/Linux 的 SSH agent、路径和权限适配
 - [ ] Windows/Linux 剪贴板权限与 Unicode 回归测试
+
+## v0.5：高性能视频传输（长期）
+
+- [ ] 视频编码串流与 VNC 做成可选传输后端
+- [ ] 评估 Sunshine/Moonlight 类低延迟视频通道或 WebRTC/H.264 方案，替代重度使用场景下的 VNC 传输；明确保留单窗口捕获、SSH/本地安全边界和跨平台输入能力
 
 ### Tauri 实现边界
 

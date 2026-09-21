@@ -14,6 +14,7 @@ function installTauriFixture(permissions) {
     holdDestruction: false,
     pending: new Set(),
     sizeCalls: [],
+    focusCalls: 0,
     decorationCalls: [],
     dragCalls: 0,
     invokeCalls: [],
@@ -83,6 +84,9 @@ function installTauriFixture(permissions) {
   const currentWindow = {
     async setSize(size) {
       fixture.sizeCalls.push({ width: size.width, height: size.height });
+    },
+    async setFocus() {
+      fixture.focusCalls++;
     },
     async setDecorations(value) {
       fixture.decorationCalls.push(value);
@@ -263,6 +267,20 @@ export async function testTauriChildren(browser, app) {
     visible = [];
     await waitClosed();
 
+    // A minimized child remains a known remote window. It must not be treated
+    // as destroyed merely because it is temporarily unmapped.
+    visible = [info("0x9")];
+    await waitOpen("0x9");
+    visible = [{ ...info("0x9"), mapped: false }];
+    await page.waitForTimeout(1200);
+    assert.equal(
+      await page.evaluate(() => window.openedChildWindows.has("0x9")),
+      true,
+    );
+    assert(!deleted.includes("window-9"));
+    visible = [];
+    await waitClosed();
+
     // Native title-bar X: no JS listener may intercept the OS close. Cleanup is
     // driven by Destroyed, not by treating a close request as successful destruction.
     visible = [info("0x3")];
@@ -337,8 +355,10 @@ export async function testTauriChildren(browser, app) {
     await page.waitForFunction(
       () => document.querySelector("#status").textContent === "已断开",
     );
+    await page.waitForFunction(() => window.tauriFixture.focusCalls > 0);
     assert.deepEqual(deleted, [
       "window-2",
+      "window-9",
       "window-3",
       "window-4",
       "window-8",
