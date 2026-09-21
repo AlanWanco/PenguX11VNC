@@ -790,6 +790,45 @@ fn upload_clipboard_files(
     })
 }
 
+#[cfg(windows)]
+fn scp_local_path(local: &Path) -> PathBuf {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+    // CF_HDROP may return an extended-length path such as
+    // `\\\\?\\I:\\directory\\file`. OpenSSH scp interprets the colon in that
+    // form as a remote-host separator (`\\\\?\\I`), so remove only the
+    // Windows extended-length prefix before passing the local path to scp.
+    let wide: Vec<u16> = local.as_os_str().encode_wide().collect();
+    const EXTENDED_PREFIX: [u16; 4] = [b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16];
+    if !wide.starts_with(&EXTENDED_PREFIX) {
+        return local.to_path_buf();
+    }
+
+    let rest = &wide[EXTENDED_PREFIX.len()..];
+    let is_drive_path = rest.len() >= 2
+        && rest[1] == b':' as u16
+        && ((b'A' as u16..=b'Z' as u16).contains(&rest[0])
+            || (b'a' as u16..=b'z' as u16).contains(&rest[0]));
+    if is_drive_path {
+        return PathBuf::from(OsString::from_wide(rest));
+    }
+
+    const UNC_PREFIX: [u16; 4] = [b'U' as u16, b'N' as u16, b'C' as u16, b'\\' as u16];
+    if rest.starts_with(&UNC_PREFIX) {
+        let mut normalized = vec![b'\\' as u16, b'\\' as u16];
+        normalized.extend_from_slice(&rest[UNC_PREFIX.len()..]);
+        return PathBuf::from(OsString::from_wide(&normalized));
+    }
+
+    local.to_path_buf()
+}
+
+#[cfg(not(windows))]
+fn scp_local_path(local: &Path) -> PathBuf {
+    local.to_path_buf()
+}
+
 fn scp_args(profile: &Profile) -> io::Result<Vec<String>> {
     // Keep scp's diagnostics available to the caller. `-q` also suppresses
     // useful authentication/SFTP errors, which made Windows failures appear
@@ -905,7 +944,7 @@ fn scp_clipboard_file(profile: &Profile, local: &Path, remote: &str) -> io::Resu
     let target = format!("{}@{}:{remote}", profile.ssh_user(), profile.ssh_host());
     let child = hidden_command("scp")
         .args(scp_args(profile)?)
-        .arg(local)
+        .arg(scp_local_path(local))
         .arg(target)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -1783,6 +1822,19 @@ mod clipboard_tests {
         assert!(message.contains("SCP 认证失败"));
         assert!(message.contains("Permission denied (publickey)."));
         assert!(message.contains("退出码 255"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn scp_local_path_normalizes_extended_windows_prefixes() {
+        assert_eq!(
+            scp_local_path(Path::new(r"\\?\I:\directory\file.txt")),
+            PathBuf::from(r"I:\directory\file.txt")
+        );
+        assert_eq!(
+            scp_local_path(Path::new(r"\\?\UNC\server\share\file.txt")),
+            PathBuf::from(r"\\server\share\file.txt")
+        );
     }
 
     #[test]
