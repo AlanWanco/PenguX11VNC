@@ -433,7 +433,7 @@ def same_window(expected: dict, actual: dict) -> bool:
 def activate(options: dict) -> dict:
     target = options.get("target") or options
     if not isinstance(target, dict):
-        raise RuntimeError("invalid-target")
+        raise TypeError("invalid-target")
     display = str(target.get("display") or "")
     xauthority = str(target.get("xauthority") or "")
     if not display.startswith(":") or not xauthority:
