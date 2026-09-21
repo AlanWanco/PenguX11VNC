@@ -40,6 +40,15 @@ class SelectionClear(C.Structure):
         ("display", D), ("window", W), ("selection", W), ("time", C.c_ulong),
     ]
 
+class SelectionNotify(C.Structure):
+    # XSelectionEvent does not contain SelectionRequestEvent.owner. Reusing
+    # SelectionRequest here shifts every field after display on 64-bit X11.
+    _fields_ = [
+        ("type", C.c_int), ("serial", C.c_ulong), ("send_event", C.c_int),
+        ("display", D), ("requestor", W), ("selection", W),
+        ("target", W), ("property", W), ("time", C.c_ulong),
+    ]
+
 class Event(C.Union):
     # XNextEvent writes the complete 192-byte XEvent, not only the selected
     # event view. Keep the union large enough to avoid corrupting ctypes state.
@@ -47,6 +56,7 @@ class Event(C.Union):
         ("type", C.c_int),
         ("request", SelectionRequest),
         ("clear", SelectionClear),
+        ("notify", SelectionNotify),
         ("padding", C.c_ubyte * 192),
     ]
 
@@ -132,14 +142,14 @@ try:
         else:
             property_atom = 0
         response = Event()
-        response.request.type = EVENT_SELECTION_NOTIFY
-        response.request.send_event = 1
-        response.request.display = display
-        response.request.requestor = request.requestor
-        response.request.selection = request.selection
-        response.request.target = request.target
-        response.request.property = property_atom
-        response.request.time = request.time
+        response.notify.type = EVENT_SELECTION_NOTIFY
+        response.notify.send_event = 1
+        response.notify.display = display
+        response.notify.requestor = request.requestor
+        response.notify.selection = request.selection
+        response.notify.target = request.target
+        response.notify.property = property_atom
+        response.notify.time = request.time
         x11.XSendEvent(display, request.requestor, 0, 0, C.byref(response))
         x11.XFlush(display)
 finally:
@@ -1814,6 +1824,8 @@ mod clipboard_tests {
         }
         assert!(FILE_CLIPBOARD_X11_PYTHON.contains("gnome_payload = b\"copy\\n\""));
         assert!(FILE_CLIPBOARD_X11_PYTHON.contains("kde_cut_payload = b\"0\""));
+        assert!(FILE_CLIPBOARD_X11_PYTHON.contains("class SelectionNotify(C.Structure)"));
+        assert!(FILE_CLIPBOARD_X11_PYTHON.contains("response.notify.property = property_atom"));
     }
 
     #[test]
