@@ -173,7 +173,12 @@ fn write_config_to(profile: &Profile, path: &std::path::Path) -> io::Result<()> 
 
 fn probe_command(action: &str, options: &Value) -> String {
     format!(
-        "python3 -c {} {} {}",
+        "{}python3 -c {} {} {}",
+        if super::debug_enabled() {
+            "PENGUX11VNC_DEBUG_WINDOWS=1 "
+        } else {
+            ""
+        },
         shell_quote(PROBE),
         shell_quote(action),
         shell_quote(&options.to_string())

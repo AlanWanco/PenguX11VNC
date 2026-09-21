@@ -13,6 +13,7 @@ export default class QQRFB extends RFB {
     super(...args);
     this._frameRate = 30;
     this._frameRateTimer = undefined;
+    this._debugPointerAt = 0;
     this._frameRequestInFlight = false;
   }
 
@@ -131,6 +132,7 @@ export default class QQRFB extends RFB {
     clearTimeout(this._mouseMoveTimer);
     this._mouseMoveTimer = null;
     this._mouseButtonMask = 0;
+    this._debugPointerAt = 0;
     this._viewportDragging = false;
     this._viewportHasMoved = false;
   }
@@ -163,6 +165,32 @@ export default class QQRFB extends RFB {
     const maxY = Math.max(0, (this._fbHeight || viewportHeight) - 1);
     pointerX = Math.max(0, Math.min(maxX, Math.round(pointerX)));
     pointerY = Math.max(0, Math.min(maxY, Math.round(pointerY)));
+
+    if (globalThis.penguX11VNCDebug) {
+      const now = performance.now();
+      if (now - this._debugPointerAt >= 500) {
+        this._debugPointerAt = now;
+        globalThis.penguX11VNCLog?.("pointer-map", {
+          inputX: x,
+          inputY: y,
+          mappedX: pointerX,
+          mappedY: pointerY,
+          mask,
+          framebuffer: { width: this._fbWidth, height: this._fbHeight },
+          viewport: viewport
+            ? {
+                x: viewport.x,
+                y: viewport.y,
+                width: viewport.w,
+                height: viewport.h,
+              }
+            : null,
+          canvas: bounds
+            ? { width: bounds.width, height: bounds.height }
+            : null,
+        });
+      }
+    }
 
     const extendedMouseButtons = mask & 0x7f80;
     if (this._extendedPointerEventSupported && extendedMouseButtons) {

@@ -20,6 +20,20 @@ import time
 from pathlib import Path
 
 
+DEBUG_WINDOWS = os.environ.get("PENGUX11VNC_DEBUG_WINDOWS") == "1"
+
+
+def debug_log(event: str, **details: object) -> None:
+    if not DEBUG_WINDOWS:
+        return
+    payload = json.dumps(details, ensure_ascii=False, separators=(",", ":"))
+    print(
+        f"[PenguX11VNC window-debug] {event} {payload[:8000]}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
 class Attributes(C.Structure):
     _fields_ = [
         ("x", C.c_int),
@@ -94,6 +108,7 @@ def sessions() -> tuple[bool, list[dict]]:
 
 class X11:
     def __init__(self, session: dict) -> None:
+        self.session = session
         os.environ["XAUTHORITY"] = session["xauthority"]
         self.lib = C.CDLL(ctypes.util.find_library("X11") or "libX11.so.6")
         signatures = {
@@ -231,6 +246,12 @@ class X11:
 
     def ensure_visible(self, target: dict) -> bool:
         window, attrs, hidden = self._target_window(target)
+        debug_log(
+            "ensure-visible",
+            id=target.get("id"),
+            mapped=attrs.map_state == 2,
+            hidden=hidden,
+        )
         if attrs.map_state == 2 and not hidden:
             return False
         self.lib.XMapRaised(self.display, window)
@@ -240,6 +261,13 @@ class X11:
     def activate(self, target: dict) -> bool:
         window, attrs, hidden = self._target_window(target)
         restored = attrs.map_state != 2 or hidden
+        debug_log(
+            "activate",
+            id=target.get("id"),
+            mapped=attrs.map_state == 2,
+            hidden=hidden,
+            restored=restored,
+        )
         if restored:
             self.lib.XMapRaised(self.display, window)
         else:
@@ -256,6 +284,7 @@ class X11:
         result = []
         normal = self.lib.XInternAtom(self.display, b"_NET_WM_WINDOW_TYPE_NORMAL", 0)
         visited = set()
+        debug_log("scan-start", root=hex(root_window), display=self.session.get("display"))
         while queue and len(visited) < 10000 and len(result) < 32:
             window, depth = queue.pop()
             if window in visited:
@@ -327,7 +356,22 @@ class X11:
                 if children:
                     self.lib.XFree(children)
         if queue:
+            debug_log("scan-too-large", visited=len(visited), returned=len(result))
             raise RuntimeError("window-scan-too-large")
+        debug_log(
+            "scan-done",
+            visited=len(visited),
+            count=len(result),
+            windows=[
+                {
+                    "id": item["id"],
+                    "mapped": item["mapped"],
+                    "width": item["width"],
+                    "height": item["height"],
+                }
+                for item in result
+            ],
+        )
         return result
 
     def close(self) -> None:
@@ -385,6 +429,7 @@ def select_password_file(requested: str) -> Path:
 
 def probe(options: dict) -> dict:
     running, displays = sessions()
+    debug_log("probe-start", displays=[session.get("display") for session in displays])
     windows, accessible = [], 0
     for session in displays:
         try:
@@ -398,6 +443,13 @@ def probe(options: dict) -> dict:
             continue
     password_file = select_password_file(str(options.get("passwordFile") or ""))
     helper = helper_directory()
+    debug_log(
+        "probe-done",
+        running=running,
+        accessible=accessible,
+        windowCount=len(windows[:32]),
+        helper=str(helper),
+    )
     return {
         "processes": [
             identity
@@ -449,6 +501,7 @@ def serve(options: dict) -> None:
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGHUP, interrupted)
     target, password = options["target"], options["passwordFile"]
+    debug_log("serve-start", target_id=target.get("id"), display=target.get("display"))
     report = probe({"passwordFile": password})
     if not report["passwordReady"] or not any(
         same_window(target, item)
@@ -487,6 +540,7 @@ def serve(options: dict) -> None:
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
     )
+    debug_log("vnc-spawn", target_id=target.get("id"), pid=child.pid)
     selector = selectors.DefaultSelector()
     selector.register(sys.stdin, selectors.EVENT_READ, "owner")
     selector.register(child.stdout, selectors.EVENT_READ, "vnc")
@@ -526,6 +580,7 @@ def serve(options: dict) -> None:
                             if not 1024 <= port <= 65535:
                                 raise RuntimeError("invalid-port")
                             ready = True
+                            debug_log("vnc-ready", pid=child.pid, port=port)
                             print(json.dumps({"port": port}), flush=True)
             if time.monotonic() >= next_visibility_check:
                 try:
@@ -534,6 +589,12 @@ def serve(options: dict) -> None:
                     pass
                 next_visibility_check = time.monotonic() + 1
     finally:
+        debug_log(
+            "vnc-stop",
+            pid=child.pid,
+            ready=ready,
+            returncode=child.poll(),
+        )
         selector.close()
         x11.close()
         if child.poll() is None:

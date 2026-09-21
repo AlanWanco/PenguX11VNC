@@ -27,6 +27,7 @@ let recoveryEpoch = 0;
 let childRecoveryTimer;
 let childRecoveryEpoch = 0;
 let remoteWindowId;
+let debugClientEnabled = false;
 let sessionReady;
 const queryParameters = new URLSearchParams(location.search);
 const sessionId = queryParameters.get("session") || "main";
@@ -316,13 +317,34 @@ function currentTauriWindow() {
 function refocusMainViewerAfterChildClose() {
   if (!isMainSession || !isTauriShell()) return;
   const current = currentTauriWindow();
+  const canvas = $("screen").querySelector("canvas");
+  debugClient("main-refocus-start", {
+    connected,
+    focused: document.hasFocus(),
+    canvas: canvas
+      ? {
+          width: canvas.width,
+          height: canvas.height,
+          cssWidth: canvas.getBoundingClientRect().width,
+          cssHeight: canvas.getBoundingClientRect().height,
+        }
+      : null,
+  });
   setTimeout(() => {
     void Promise.resolve(current?.setFocus?.())
-      .catch(() => {})
+      .catch((error) => {
+        debugClient("main-refocus-error", {
+          message: error?.message || String(error),
+        });
+      })
       .finally(() => {
         if (!connected) return;
         rfb?.resetPointerState?.();
         rfb?.focus({ preventScroll: true });
+        debugClient("main-refocus-done", {
+          focused: document.hasFocus(),
+          active: document.activeElement?.tagName || null,
+        });
         requestRemoteWindowActivation();
       });
   }, 0);
@@ -478,6 +500,11 @@ function rememberMainTauriScale(value) {
   preferredTauriScale = normalized;
   if (settings.vncScale === normalized && !changed) return;
   settings.vncScale = normalized;
+  debugClient("scale-remembered", {
+    scale: normalized,
+    settingsReady,
+    connected,
+  });
   if (settingsReady) {
     save();
   } else {
@@ -534,6 +561,15 @@ async function api(path, options = {}) {
   headers.set("X-PenguX11VNC-Token", token || "");
   return fetch(path, { ...options, headers });
 }
+function debugClient(event, details = {}) {
+  if (!debugClientEnabled) return;
+  void api(`/api/debug?session=${encodeURIComponent(sessionId)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ event, details }),
+  }).catch(() => {});
+}
+globalThis.penguX11VNCLog = debugClient;
 async function activateRemoteWindow() {
   if (
     !isTauriShell() ||
@@ -633,6 +669,8 @@ async function loadSessionInfo() {
     );
     if (!response.ok) return;
     const data = await response.json();
+    debugClientEnabled = data.debug === true;
+    globalThis.penguX11VNCDebug = debugClientEnabled;
     setupAvailable = data.setupAvailable === true && isMainSession;
     $("setup-open").hidden = !setupAvailable;
     $("setup-edit").hidden = !setupAvailable;
@@ -898,6 +936,11 @@ async function openChildWindow(info, userInitiated = false) {
       const markClosed = () => {
         entry.closed = true;
         entry.closeRequested = false;
+        debugClient("child-destroyed", {
+          key,
+          sessionId: entry.sessionId,
+          windowId: info.id,
+        });
         refocusMainViewerAfterChildClose();
         void cleanupChildEntry(key, entry);
       };
@@ -1197,6 +1240,7 @@ async function connect(prepare = true) {
     client.addEventListener("connect", () => {
       stopChildRecoveryMonitor();
       connected = true;
+      debugClient("vnc-connect", { sessionId, child: !isMainSession });
       state("已连接", "connected");
       if (isMainSession) {
         imeOverlay = new ImeOverlay({
@@ -1223,6 +1267,11 @@ async function connect(prepare = true) {
       requestRemoteWindowActivation();
     });
     client.addEventListener("disconnect", (event) => {
+      debugClient("vnc-disconnect", {
+        sessionId,
+        clean: event.detail.clean,
+        child: !isMainSession,
+      });
       connected = false;
       remoteFilePasteSignature = undefined;
       if (isMainSession) void cleanupOpenedChildSessions();
@@ -1308,6 +1357,7 @@ function startChildRecoveryMonitor() {
       return;
     }
     try {
+      debugClient("child-recovery-attempt", { sessionId, remoteWindowId });
       await api(`/api/sessions/${encodeURIComponent(sessionId)}/activate`, {
         method: "POST",
       });

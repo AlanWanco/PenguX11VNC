@@ -21,6 +21,12 @@ import { normalizeConnection, connectionFromJson } from "./config.js";
 import { startImeBridge, imeCommandFor } from "./ime-bridge.js";
 
 const execFileAsync = promisify(execFile);
+const debugEnabled = process.env.PENGUX11VNC_DEBUG === "1";
+function debugLog(event, details = {}) {
+  if (!debugEnabled) return;
+  const safe = (JSON.stringify(details) || "{}").slice(0, 12000);
+  console.error(`[PenguX11VNC debug] ${event} ${safe}`);
+}
 const root = path.dirname(fileURLToPath(import.meta.url));
 const publicRoot = path.join(root, "public");
 const vendorRoot = path.join(root, "node_modules/@novnc/novnc");
@@ -252,16 +258,26 @@ function sshArgs(connection, forwards = [], noCommand = false) {
 }
 
 async function runSsh(connection, command, timeout = 10000) {
-  const { stdout } = await execFileAsync(
-    "ssh",
-    [...sshArgs(connection), command],
-    {
-      timeout,
-      maxBuffer: 256 * 1024,
-      windowsHide: true,
-    },
-  );
-  return stdout.trim();
+  try {
+    const { stdout, stderr } = await execFileAsync(
+      "ssh",
+      [...sshArgs(connection), command],
+      {
+        timeout,
+        maxBuffer: 256 * 1024,
+        windowsHide: true,
+      },
+    );
+    if (stderr?.trim())
+      debugLog("ssh-stderr", { text: stderr.trim().slice(0, 8000) });
+    return stdout.trim();
+  } catch (error) {
+    if (error.stderr?.trim())
+      debugLog("ssh-stderr-error", {
+        text: error.stderr.trim().slice(0, 8000),
+      });
+    throw error;
+  }
 }
 
 async function managerRequest(manager, pathname, options = {}) {
@@ -271,6 +287,7 @@ async function managerRequest(manager, pathname, options = {}) {
     ...options,
     headers,
   });
+  debugLog("manager-response", { pathname, status: response.status });
   const data = await response.json().catch(() => ({}));
   if (!response.ok)
     throw new Error(data.error || `Rust manager HTTP ${response.status}`);
@@ -429,12 +446,28 @@ export async function startServer({
 
   async function listRemoteWindows() {
     if (!canManageRemoteWindows) return [];
-    if (rustManager)
-      return (await managerRequest(rustManager, "/windows")).windows;
+    if (rustManager) {
+      const windows = (await managerRequest(rustManager, "/windows")).windows;
+      debugLog("windows-discovered", {
+        count: windows?.length || 0,
+        windows: (windows || []).map(
+          ({ id, mapped, width, height, x, y, depth }) => ({
+            id,
+            mapped,
+            width,
+            height,
+            x,
+            y,
+            depth,
+          }),
+        ),
+      });
+      return windows;
+    }
     const env = `env DISPLAY=${shellQuote(profile.window.display)} XAUTHORITY=${shellQuote(profile.window.xauthority)}`;
-    const command = `${env} ${shellQuote(profile.helpers.windowList)} ${shellQuote(profile.window.id)} ${shellQuote(profile.window.className)}`;
+    const command = `${debugEnabled ? "PENGUX11VNC_DEBUG_WINDOWS=1 " : ""}${env} ${shellQuote(profile.helpers.windowList)} ${shellQuote(profile.window.id)} ${shellQuote(profile.window.className)}`;
     const output = await runSsh(profile, command, 7000);
-    return output
+    const windows = output
       .split("\n")
       .filter(Boolean)
       .map((line) => JSON.parse(line))
@@ -445,6 +478,19 @@ export async function startServer({
           Number(item.width) >= profile.children.minWidth &&
           Number(item.height) >= profile.children.minHeight,
       );
+    debugLog("windows-discovered", {
+      count: windows.length,
+      windows: windows.map(({ id, mapped, width, height, x, y, depth }) => ({
+        id,
+        mapped,
+        width,
+        height,
+        x,
+        y,
+        depth,
+      })),
+    });
+    return windows;
   }
 
   async function findRemotePort() {
@@ -461,6 +507,12 @@ export async function startServer({
   }
 
   async function startChildSession(windowInfo) {
+    debugLog("child-open-request", {
+      id: windowInfo.id,
+      mapped: windowInfo.mapped,
+      width: windowInfo.width,
+      height: windowInfo.height,
+    });
     const existing = [...sessions.values()].find(
       (session) =>
         session.windowId.toLowerCase() === windowInfo.id.toLowerCase(),
@@ -589,6 +641,13 @@ export async function startServer({
   async function cleanupSession(session) {
     if (!session || session.id === "main" || !childProcesses.has(session.id))
       return;
+    debugLog("session-cleanup", {
+      id: session.id,
+      windowId: session.windowId,
+      remotePid: session.remotePid,
+      remotePort: session.remotePort,
+      viewerCount: session.viewerCount,
+    });
     clearTimeout(session.viewerCleanupTimer);
     session.reconnectGraceUntil = 0;
     sessions.delete(session.id);
@@ -821,11 +880,28 @@ export async function startServer({
         if (password === undefined) password = cachedVncPassword;
         return json(res, 200, password === undefined ? {} : { password });
       }
+      if (url.pathname === "/api/debug" && req.method === "POST") {
+        if (!debugEnabled) return json(res, 404, { error: "debug-disabled" });
+        const body = await requestBody(req, 8192);
+        debugLog("frontend", {
+          session: sessionId,
+          event:
+            typeof body.event === "string"
+              ? body.event.slice(0, 80)
+              : "unknown",
+          details:
+            body.details && typeof body.details === "object"
+              ? body.details
+              : {},
+        });
+        return json(res, 200, { ok: true });
+      }
       if (url.pathname === "/api/session") {
         const session = getSession(sessionId);
         return session
           ? json(res, 200, {
               session: publicSession(session),
+              debug: debugEnabled,
               setupAvailable: Boolean(rustManager),
               profile: {
                 id: profile.id,
@@ -853,6 +929,11 @@ export async function startServer({
           profile.id,
           body.settings || body,
         );
+        debugLog("settings-saved", {
+          profile: profile.id,
+          vncScale: saved.settings.vncScale,
+          scale: saved.settings.scale,
+        });
         return json(res, 200, saved);
       }
       if (url.pathname === "/api/layout") {
@@ -987,6 +1068,12 @@ export async function startServer({
         session.viewerCount = Math.max(0, (session.viewerCount || 1) - 1);
         if (code !== 1000 && code !== 1001 && code !== 1005)
           session.reconnectGrace = true;
+        debugLog("viewer-close", {
+          session: session.id,
+          code,
+          viewerCount: session.viewerCount,
+          reconnectGrace: session.reconnectGrace === true,
+        });
         scheduleUnviewedCleanup(session);
       };
       ws.once("close", releaseViewer);
@@ -1001,10 +1088,26 @@ export async function startServer({
       );
       upstream.once("connect", () => upstream.setTimeout(0));
       upstream.pipe(stream).pipe(upstream);
-      upstream.on("error", () => ws.close(1011, "VNC tunnel unavailable"));
-      stream.on("error", () => upstream.destroy());
+      upstream.on("error", (error) => {
+        debugLog("vnc-upstream-error", {
+          session: session.id,
+          message: error.message,
+        });
+        ws.close(1011, "VNC tunnel unavailable");
+      });
+      stream.on("error", (error) => {
+        debugLog("vnc-stream-error", {
+          session: session.id,
+          message: error.message,
+        });
+        upstream.destroy();
+      });
       ws.on("close", () => upstream.destroy());
       upstream.on("close", () => {
+        debugLog("vnc-upstream-close", {
+          session: session.id,
+          websocketState: ws.readyState,
+        });
         if (ws.readyState === 1) ws.close(1011, "VNC tunnel closed");
       });
     });

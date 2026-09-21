@@ -561,6 +561,27 @@ fn write_session(runtime: &Path, url: &Url, pid: u32, profile: &Profile) -> io::
     Ok(())
 }
 
+fn prepare_debug_log(runtime: &Path) -> io::Result<()> {
+    if std::env::var("PENGUX11VNC_DEBUG").as_deref() != Ok("1") {
+        return Ok(());
+    }
+    fs::create_dir_all(runtime)?;
+    let path = runtime.join("tauri-manager.log");
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&path)?;
+    drop(file);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+    }
+    std::env::set_var("PENGUX11VNC_DEBUG_LOG", path);
+    Ok(())
+}
+
 fn bundled_node(root: &Path) -> PathBuf {
     if let Ok(path) = std::env::var("PENGUX11VNC_NODE") {
         return PathBuf::from(path);
@@ -660,12 +681,13 @@ pub fn run() {
         ])
         .setup(|app| {
             let root = bridge_root(app.handle())?;
-            let (profile, configured, startup_error) = startup_profile();
-            let manager = ManagerRuntime::start(profile.clone(), configured, startup_error)?;
             let runtime = app
                 .path()
                 .app_data_dir()
                 .map_err(|error| io::Error::other(error.to_string()))?;
+            prepare_debug_log(&runtime)?;
+            let (profile, configured, startup_error) = startup_profile();
+            let manager = ManagerRuntime::start(profile.clone(), configured, startup_error)?;
             let (node, url) = match start_node(&root, &runtime, &profile, &manager) {
                 Ok(result) => result,
                 Err(error) => {

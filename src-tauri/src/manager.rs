@@ -22,6 +22,28 @@ use std::time::{Duration, Instant};
 const DEFAULT_CONFIG: &str = ".config/pengux11vnc/connections.json";
 const LEGACY_CONFIG: &str = ".config/qq-window-viewer/connections.json";
 const VNC_CREDENTIAL_SERVICE: &str = "com.alanwanco.PenguX11VNC";
+
+fn debug_enabled() -> bool {
+    std::env::var("PENGUX11VNC_DEBUG").as_deref() == Ok("1")
+}
+
+fn debug_log(event: &str, details: impl std::fmt::Display) {
+    if !debug_enabled() {
+        return;
+    }
+    let details = details
+        .to_string()
+        .replace('\n', "\\n")
+        .replace('\r', "\\r");
+    let line = format!("[PenguX11VNC debug] {event} {details}");
+    eprintln!("{line}");
+    if let Ok(path) = std::env::var("PENGUX11VNC_DEBUG_LOG") {
+        if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(file, "{line}");
+        }
+    }
+}
+
 const FILE_CLIPBOARD_X11_PYTHON: &str = r#"
 import ctypes as C, ctypes.util as U, sys
 
@@ -689,6 +711,13 @@ impl ManagerState {
             .into_iter()
             .find(|window| window.mapped && window.id.eq_ignore_ascii_case(requested_id))
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "QQ 子窗口不可见"))?;
+        debug_log(
+            "child-open",
+            format!(
+                "id={} mapped={} geometry={}x{}",
+                window.id, window.mapped, window.width, window.height
+            ),
+        );
         let session_id = format!(
             "window-{}",
             window.id.trim_start_matches("0x").to_lowercase()
@@ -699,6 +728,13 @@ impl ManagerState {
             }
         }
         if let Some(mut stale) = self.children.remove(&session_id) {
+            debug_log(
+                "child-vnc-restart",
+                format!(
+                    "session={} window={} old-pid={} local-port={}",
+                    session_id, stale.info.window_id, stale.remote_pid, stale.info.local_port
+                ),
+            );
             stop_remote_vnc(&self.profile, stale.remote_pid, &mut stale.tunnel);
         }
 
@@ -780,6 +816,13 @@ impl ManagerState {
                 window = shell_quote(&child.info.window_id),
                 class_name = shell_quote(&self.profile.class_name()),
                 pid = child.remote_pid,
+            );
+            debug_log(
+                "child-cleanup",
+                format!(
+                    "session={} window={} pid={} remote-port={}",
+                    id, child.info.window_id, child.remote_pid, child.info.remote_port
+                ),
             );
             let _ = run_ssh(&self.profile, &cleanup_command, Duration::from_secs(5));
             stop_remote_vnc(&self.profile, child.remote_pid, &mut child.tunnel);
@@ -1230,7 +1273,12 @@ fn discover_windows(profile: &Profile) -> io::Result<Vec<WindowInfo>> {
         return onboarding::fallback_windows(profile);
     }
     let command = format!(
-        "env DISPLAY={} XAUTHORITY={} {} {} {}",
+        "{}env DISPLAY={} XAUTHORITY={} {} {} {}",
+        if debug_enabled() {
+            "PENGUX11VNC_DEBUG_WINDOWS=1 "
+        } else {
+            ""
+        },
         shell_quote(&profile.display()),
         shell_quote(&profile.xauthority()),
         shell_quote(&profile.window_list_helper()),
@@ -1386,6 +1434,12 @@ fn run_ssh(profile: &Profile, command: &str, timeout: Duration) -> io::Result<St
         if let Some(status) = child.try_wait()? {
             let output = out.join().unwrap_or_default();
             let diagnostic = err.join().unwrap_or_default();
+            if !diagnostic.is_empty() {
+                debug_log(
+                    "ssh-stderr",
+                    String::from_utf8_lossy(&diagnostic).trim().to_string(),
+                );
+            }
             if status.success() {
                 return Ok(String::from_utf8_lossy(&output).to_string());
             }
