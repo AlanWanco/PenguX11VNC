@@ -101,7 +101,7 @@ test("viewer settings persist for the main session", async (t) => {
     await rm(directory, { recursive: true, force: true });
   });
   const headers = {
-    "X-QQ-Token": app.token,
+    "X-PenguX11VNC-Token": app.token,
     "Content-Type": "application/json",
   };
   const saved = await fetch(`${app.origin}/api/settings?session=main`, {
@@ -183,7 +183,7 @@ test("VNC credentials are shared in memory and cleared on request", async (t) =>
   const app = await startServer({ port: 0 });
   t.after(() => app.close());
   const headers = {
-    "X-QQ-Token": app.token,
+    "X-PenguX11VNC-Token": app.token,
     "Content-Type": "application/json",
   };
   const saved = await fetch(
@@ -290,7 +290,7 @@ test("closing a child VNC websocket reclaims its remote session", async (t) => {
     await new Promise((resolve) => manager.close(resolve));
     await new Promise((resolve) => rfbServer.close(resolve));
   });
-  const headers = { "X-QQ-Token": app.token };
+  const headers = { "X-PenguX11VNC-Token": app.token };
   const opened = await fetch(
     `${app.origin}/api/windows/0x2/open?session=main`,
     { method: "POST", headers },
@@ -299,7 +299,7 @@ test("closing a child VNC websocket reclaims its remote session", async (t) => {
   const child = await opened.json();
   const ws = new WebSocket(
     `${app.origin.replace("http:", "ws:")}/vnc?session=${child.session.id}`,
-    { headers: { Origin: app.origin, "X-QQ-Token": app.token } },
+    { headers: { Origin: app.origin, "X-PenguX11VNC-Token": app.token } },
   );
   await once(ws, "open");
   ws.close();
@@ -320,7 +320,7 @@ test("local server restricts API, Origin, Host, static files and WebSocket acces
   assert.equal(page.headers["cache-control"], "no-store");
   assert.equal((await request(app.origin, "/api/credentials")).status, 403);
   const credentials = await request(app.origin, "/api/credentials", {
-    "X-QQ-Token": app.token,
+    "X-PenguX11VNC-Token": app.token,
   });
   assert.equal(credentials.status, 200);
   assert.deepEqual(JSON.parse(credentials.body), {});

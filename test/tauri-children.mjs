@@ -156,7 +156,7 @@ export async function testTauriChildren(browser, app) {
   try {
     await page.goto(app.url);
     await page.waitForFunction(
-      () => !location.hash && !!sessionStorage.getItem("qq-viewer-token"),
+      () => !location.hash && !!sessionStorage.getItem("pengux11vnc-token"),
     );
     await page.click("#connect");
     await page.waitForFunction(

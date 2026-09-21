@@ -15,7 +15,7 @@ def main() -> None:
     )
     parser.add_argument("key", type=Path, help="已有私钥文件，例如 ~/.ssh/id_ed25519")
     parser.add_argument(
-        "--config-dir", type=Path, default=Path.home() / ".config/qq-window-viewer"
+        "--config-dir", type=Path, default=Path.home() / ".config/pengux11vnc"
     )
     parser.add_argument(
         "--name", default="id_remote", help="保存文件名，默认 id_remote"

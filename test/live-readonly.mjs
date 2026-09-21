@@ -13,7 +13,7 @@ try {
   });
   await context.addInitScript(() =>
     localStorage.setItem(
-      "qq-viewer-settings",
+      "pengux11vnc-settings",
       JSON.stringify({ viewOnly: true, wheel: 25, scale: "fit" }),
     ),
   );

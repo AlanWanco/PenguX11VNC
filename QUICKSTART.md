@@ -9,7 +9,7 @@
 下载 GitHub Actions 的调试 `.dmg` 后直接安装即可；安装包已内置对应架构 Node.js。源码开发时执行：
 
 ```sh
-cd qq-viewer
+cd PenguX11VNC
 npm ci
 ```
 
@@ -84,7 +84,7 @@ python3 tools/import-key.py ~/.ssh/id_ed25519
 把脚本输出的路径写入配置档或向导中的私钥路径。加密私钥先加入 agent：
 
 ```sh
-ssh-add ~/.config/qq-window-viewer/keys/id_remote
+ssh-add ~/.config/pengux11vnc/keys/id_remote
 ```
 
 Windows 使用 OpenSSH 的 `ssh-agent`；Linux/macOS 使用系统 `ssh-agent` 或钥匙串。工具不保存私钥口令。
@@ -92,9 +92,9 @@ Windows 使用 OpenSSH 的 `ssh-agent`；Linux/macOS 使用系统 `ssh-agent` �
 ## 5. 手工创建连接配置（可选）
 
 ```sh
-mkdir -p ~/.config/qq-window-viewer
-cp connections.example.json ~/.config/qq-window-viewer/connections.json
-chmod 600 ~/.config/qq-window-viewer/connections.json
+mkdir -p ~/.config/pengux11vnc
+cp connections.example.json ~/.config/pengux11vnc/connections.json
+chmod 600 ~/.config/pengux11vnc/connections.json
 ```
 
 编辑以下字段：
@@ -106,14 +106,14 @@ chmod 600 ~/.config/qq-window-viewer/connections.json
 | `tunnel.localPort`                     | 本机端口，通常 `15900`                                                                                                     |
 | `tunnel.remoteHost` / `remotePort`     | 远端 x11vnc 地址，通常 `127.0.0.1:5900`                                                                                    |
 | `vnc.passwordFile`                     | 本机 VNC 密码文件；没有则弹窗输入                                                                                          |
-| `vnc.remotePasswordFile`               | Linux 上 x11vnc 使用的密码文件；向导留空会自动检查 `$XDG_RUNTIME_DIR/x11vnc.pass` 与 `~/.config/qq-window-viewer/vnc.pass` |
+| `vnc.remotePasswordFile`               | Linux 上 x11vnc 使用的密码文件；向导留空会自动检查 `$XDG_RUNTIME_DIR/x11vnc.pass` 与 `~/.config/pengux11vnc/vnc.pass` |
 | `window.display` / `xauthority` / `id` | Linux Xwayland 会话信息                                                                                                    |
 | `helpers.windowList` / `imeCapture`    | 远端 helper 的绝对路径                                                                                                     |
 | `clipboard.sync`                       | 是否允许此配置档启用剪贴板同步，默认 `false`                                                                               |
 | `viewer.bitrate`                       | `lossless`、`high`、`balanced`、`low`；默认无损                                                                            |
 | `viewer.frameRate`                     | `0` 不限，或 `5/10/15/24/30/60`；默认 `30`                                                                                 |
 
-主窗口运行时修改的显示设置会保存到 `~/.config/qq-window-viewer/settings.json`；QQ 子窗口继承主窗口设置。
+主窗口运行时修改的显示设置会保存到 `~/.config/pengux11vnc/settings.json`；QQ 子窗口继承主窗口设置。
 
 密码文件权限必须是 `600`。JSON 不支持注释；需要说明时另写文档，不要把密码写进 JSON。
 
@@ -136,7 +136,7 @@ npm run tauri:dev
 命令行选择配置档：
 
 ```sh
-python3 tools/launch.py --config ~/.config/qq-window-viewer/connections.json --profile linux-qq
+python3 tools/launch.py --config ~/.config/pengux11vnc/connections.json --profile linux-qq
 ```
 
 只启动本地服务、不打开 Chrome：

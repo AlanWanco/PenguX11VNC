@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { homedir } from "node:os";
 import {
   chmod,
+  copyFile,
   mkdir,
   readFile,
   realpath,
@@ -46,7 +47,15 @@ function validSessionId(value) {
   return typeof value === "string" && /^(main|window-[0-9a-f]+)$/i.test(value);
 }
 
+function environment(primary, legacy) {
+  return process.env[primary] || process.env[legacy];
+}
+
 const defaultViewerSettingsPath = path.join(
+  homedir(),
+  ".config/pengux11vnc/settings.json",
+);
+const legacyViewerSettingsPath = path.join(
   homedir(),
   ".config/qq-window-viewer/settings.json",
 );
@@ -65,6 +74,25 @@ function normalizeViewerSettings(value = {}) {
     autoChildOpen: value.autoChildOpen !== false,
     systemTitlebar: value.systemTitlebar !== false,
   };
+}
+
+async function migrateViewerSettingsPath(settingsPath) {
+  if (settingsPath !== defaultViewerSettingsPath) return settingsPath;
+  try {
+    await stat(settingsPath);
+    return settingsPath;
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  try {
+    await stat(legacyViewerSettingsPath);
+    await mkdir(path.dirname(settingsPath), { recursive: true, mode: 0o700 });
+    await copyFile(legacyViewerSettingsPath, settingsPath);
+    await chmod(settingsPath, 0o600);
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  return settingsPath;
 }
 
 async function loadViewerSettings(settingsPath, profileId) {
@@ -305,9 +333,12 @@ export async function startServer({
   imeCommand,
   imeEnabled = false,
   manager,
-  settingsPath = process.env.QQ_VIEWER_SETTINGS_PATH ||
-    defaultViewerSettingsPath,
+  settingsPath = environment(
+    "PENGUX11VNC_SETTINGS_PATH",
+    "QQ_VIEWER_SETTINGS_PATH",
+  ) || defaultViewerSettingsPath,
 } = {}) {
+  settingsPath = await migrateViewerSettingsPath(settingsPath);
   let profile = normalizeConnection(
     connection || { vnc: { passwordFile: "" }, children: { enabled: false } },
     connection?.id || "runtime",
@@ -335,13 +366,18 @@ export async function startServer({
     maxPayload: 1024 * 1024,
     perMessageDeflate: false,
   });
+  const rustManagerUrl = environment(
+    "PENGUX11VNC_RUST_MANAGER_URL",
+    "QQ_RUST_MANAGER_URL",
+  );
+  const rustManagerToken = environment(
+    "PENGUX11VNC_RUST_MANAGER_TOKEN",
+    "QQ_RUST_MANAGER_TOKEN",
+  );
   const rustManager =
     manager ||
-    (process.env.QQ_RUST_MANAGER_URL && process.env.QQ_RUST_MANAGER_TOKEN
-      ? {
-          url: process.env.QQ_RUST_MANAGER_URL,
-          token: process.env.QQ_RUST_MANAGER_TOKEN,
-        }
+    (rustManagerUrl && rustManagerToken
+      ? { url: rustManagerUrl, token: rustManagerToken }
       : undefined);
   const canManageRemoteWindows =
     Boolean(rustManager) || (Boolean(connection) && profile.children.enabled);
@@ -357,7 +393,9 @@ export async function startServer({
   }
   function authorized(req, url) {
     return matchesSecret(
-      req.headers["x-qq-token"] || url.searchParams.get("token"),
+      req.headers["x-pengux11vnc-token"] ||
+        req.headers["x-qq-token"] ||
+        url.searchParams.get("token"),
       token,
     );
   }
@@ -447,7 +485,7 @@ export async function startServer({
     const sessionId = `window-${windowInfo.id.slice(2).toLowerCase()}`;
     const remotePort = await findRemotePort();
     const localPort = await allocatePort();
-    const logPath = `/tmp/qq-window-viewer-${windowInfo.id.slice(2).toLowerCase()}.log`;
+    const logPath = `/tmp/pengux11vnc-${windowInfo.id.slice(2).toLowerCase()}.log`;
     const env = `env DISPLAY=${shellQuote(profile.window.display)} XAUTHORITY=${shellQuote(profile.window.xauthority)}`;
     const args = [
       "nohup",
@@ -950,21 +988,35 @@ if (
   process.argv[1] &&
   import.meta.url === pathToFileURL(process.argv[1]).href
 ) {
-  const connection = process.env.QQ_CONNECTION_JSON
-    ? connectionFromJson(process.env.QQ_CONNECTION_JSON)
+  const connectionJson = environment(
+    "PENGUX11VNC_CONNECTION_JSON",
+    "QQ_CONNECTION_JSON",
+  );
+  const managerUrl = environment(
+    "PENGUX11VNC_RUST_MANAGER_URL",
+    "QQ_RUST_MANAGER_URL",
+  );
+  const managerToken = environment(
+    "PENGUX11VNC_RUST_MANAGER_TOKEN",
+    "QQ_RUST_MANAGER_TOKEN",
+  );
+  const connection = connectionJson
+    ? connectionFromJson(connectionJson)
     : undefined;
   const app = await startServer({
-    port: Number(process.env.QQ_VIEWER_PORT || 6088),
-    targetPort: Number(process.env.QQ_VNC_PORT || 0) || undefined,
-    passwordFile: process.env.QQ_VNC_PASSWORD_FILE || undefined,
+    port: Number(environment("PENGUX11VNC_PORT", "QQ_VIEWER_PORT") || 6088),
+    targetPort:
+      Number(environment("PENGUX11VNC_VNC_PORT", "QQ_VNC_PORT") || 0) ||
+      undefined,
+    passwordFile:
+      environment("PENGUX11VNC_VNC_PASSWORD_FILE", "QQ_VNC_PASSWORD_FILE") ||
+      undefined,
     connection,
-    imeEnabled: process.env.QQ_IME_ENABLED === "1",
+    imeEnabled:
+      environment("PENGUX11VNC_IME_ENABLED", "QQ_IME_ENABLED") === "1",
     manager:
-      process.env.QQ_RUST_MANAGER_URL && process.env.QQ_RUST_MANAGER_TOKEN
-        ? {
-            url: process.env.QQ_RUST_MANAGER_URL,
-            token: process.env.QQ_RUST_MANAGER_TOKEN,
-          }
+      managerUrl && managerToken
+        ? { url: managerUrl, token: managerToken }
         : undefined,
   });
   console.log(app.url);

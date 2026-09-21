@@ -19,7 +19,8 @@ use std::sync::{
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-const DEFAULT_CONFIG: &str = ".config/qq-window-viewer/connections.json";
+const DEFAULT_CONFIG: &str = ".config/pengux11vnc/connections.json";
+const LEGACY_CONFIG: &str = ".config/qq-window-viewer/connections.json";
 const VNC_CREDENTIAL_SERVICE: &str = "com.alanwanco.PenguX11VNC";
 const FILE_CLIPBOARD_X11_PYTHON: &str = r#"
 import ctypes as C, ctypes.util as U, sys
@@ -408,7 +409,7 @@ impl Profile {
         self.text(
             "helpers",
             "windowList",
-            "/home/remote-user/.local/lib/qq-window-viewer/list-qq-windows",
+            "/home/remote-user/.local/lib/pengux11vnc/list-qq-windows",
         )
     }
 
@@ -416,7 +417,7 @@ impl Profile {
         self.text(
             "helpers",
             "imeCapture",
-            "/home/remote-user/.local/lib/qq-window-viewer/capture-ime",
+            "/home/remote-user/.local/lib/pengux11vnc/capture-ime",
         )
     }
 
@@ -1112,11 +1113,26 @@ impl Drop for ManagerRuntime {
     }
 }
 
+fn config_path_for_read() -> PathBuf {
+    if let Ok(path) = std::env::var("PENGUX11VNC_CONFIG") {
+        return PathBuf::from(path);
+    }
+    if let Ok(path) = std::env::var("QQ_VIEWER_CONFIG") {
+        return PathBuf::from(path);
+    }
+    let current = home_path(DEFAULT_CONFIG);
+    if current.exists() {
+        current
+    } else {
+        home_path(LEGACY_CONFIG)
+    }
+}
+
 pub fn load_profile() -> io::Result<Profile> {
-    let config_path = std::env::var("QQ_VIEWER_CONFIG")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| home_path(DEFAULT_CONFIG));
-    let selected = std::env::var("QQ_VIEWER_PROFILE").ok();
+    let config_path = config_path_for_read();
+    let selected = std::env::var("PENGUX11VNC_PROFILE")
+        .or_else(|_| std::env::var("QQ_VIEWER_PROFILE"))
+        .ok();
     if !config_path.exists() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,

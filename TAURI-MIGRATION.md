@@ -11,7 +11,7 @@
 `src-tauri/` 已加入可运行的 Tauri 2 外壳：
 
 ```sh
-cd qq-viewer
+cd PenguX11VNC
 npm run tauri:dev
 ```
 

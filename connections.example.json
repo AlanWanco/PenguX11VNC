@@ -8,7 +8,7 @@
         "user": "remote-user",
         "host": "remote.example",
         "port": 22,
-        "privateKeyFile": "~/.config/qq-window-viewer/keys/id_remote"
+        "privateKeyFile": "~/.config/pengux11vnc/keys/id_remote"
       },
       "tunnel": {
         "localPort": 15900,
@@ -16,7 +16,7 @@
         "remotePort": 5900
       },
       "vnc": {
-        "passwordFile": "~/.config/qq-window-viewer/vnc.pass",
+        "passwordFile": "~/.config/pengux11vnc/vnc.pass",
         "remotePasswordFile": "/run/user/1000/x11vnc.pass"
       },
       "window": {
@@ -26,8 +26,8 @@
         "className": "QQ"
       },
       "helpers": {
-        "windowList": "/home/remote-user/.local/lib/qq-window-viewer/list-qq-windows",
-        "imeCapture": "/home/remote-user/.local/lib/qq-window-viewer/capture-ime"
+        "windowList": "/home/remote-user/.local/lib/pengux11vnc/list-qq-windows",
+        "imeCapture": "/home/remote-user/.local/lib/pengux11vnc/capture-ime"
       },
       "children": {
         "enabled": true,

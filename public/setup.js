@@ -1,10 +1,17 @@
 const $ = (id) => document.getElementById(id);
+const SESSION_TOKEN_KEY = "pengux11vnc-token";
+const SESSION_LEGACY_TOKEN_KEY = "qq-viewer-token";
 const DRAFT_KEY = "pengux11vnc.setup-draft.v1";
 const fragment = new URLSearchParams(location.hash.slice(1));
 let token = fragment.get("token");
 try {
-  token ||= sessionStorage.getItem("qq-viewer-token");
-  if (token) sessionStorage.setItem("qq-viewer-token", token);
+  token ||=
+    sessionStorage.getItem(SESSION_TOKEN_KEY) ||
+    sessionStorage.getItem(SESSION_LEGACY_TOKEN_KEY);
+  if (token) {
+    sessionStorage.setItem(SESSION_TOKEN_KEY, token);
+    sessionStorage.removeItem(SESSION_LEGACY_TOKEN_KEY);
+  }
 } catch {
   /* Storage is optional. */
 }
@@ -59,7 +66,10 @@ function applyFormValues(value) {
 async function api(path, body) {
   const response = await fetch(path, {
     method: body === undefined ? "GET" : "POST",
-    headers: { "X-QQ-Token": token || "", "Content-Type": "application/json" },
+    headers: {
+      "X-PenguX11VNC-Token": token || "",
+      "Content-Type": "application/json",
+    },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
   const data = await response.json().catch(() => ({}));

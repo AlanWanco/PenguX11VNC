@@ -606,18 +606,21 @@ fn start_node(
     command
         .arg(root.join("server.js"))
         .current_dir(root)
-        .env("QQ_VIEWER_PORT", "0")
-        .env("QQ_VNC_PORT", profile.local_port().to_string())
-        .env("QQ_IME_ENABLED", "1")
-        .env("QQ_CONNECTION_JSON", profile.normalized_json().to_string())
-        .env("QQ_RUST_MANAGER_URL", &manager.url)
-        .env("QQ_RUST_MANAGER_TOKEN", &manager.token)
+        .env("PENGUX11VNC_PORT", "0")
+        .env("PENGUX11VNC_VNC_PORT", profile.local_port().to_string())
+        .env("PENGUX11VNC_IME_ENABLED", "1")
+        .env(
+            "PENGUX11VNC_CONNECTION_JSON",
+            profile.normalized_json().to_string(),
+        )
+        .env("PENGUX11VNC_RUST_MANAGER_URL", &manager.url)
+        .env("PENGUX11VNC_RUST_MANAGER_TOKEN", &manager.token)
         .stdin(Stdio::null())
         .stdout(Stdio::from(log.try_clone()?))
         .stderr(Stdio::from(log));
     if let Some(password_file) = profile.local_password_file() {
         if Path::new(&password_file).is_file() {
-            command.env("QQ_VNC_PASSWORD_FILE", password_file);
+            command.env("PENGUX11VNC_VNC_PASSWORD_FILE", password_file);
         }
     }
 

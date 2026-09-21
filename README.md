@@ -46,7 +46,7 @@ npm run tauri:dev
 - 顶部「适应」：保持宽高比；「1:1」：原始像素。Tauri 主窗口原生锁定 VNC 画面加 UI 外框的长宽比，拖动窗口边框时不会再拉出两侧空白；浏览器回退入口仍受浏览器窗口策略限制。
 - 「设置 → 传输码率」默认无损，也可选择高/均衡/低档 JPEG；VNC 按画面变化压缩，不承诺固定 Mbps。
 - 「设置 → 帧率上限」可选 5/10/15/24/30/60 FPS 或不限；通过控制 VNC 增量请求频率限流，不修改远端 QQ 刷新率。
-- 「设置 → 滚轮灵敏度」默认 **25%**，可在 5%～100% 调节，只影响本连接；主窗口设置会保存到 `~/.config/qq-window-viewer/settings.json`，下次启动继续使用。
+- 「设置 → 滚轮灵敏度」默认 **25%**，可在 5%～100% 调节，只影响本连接；主窗口设置会保存到 `~/.config/pengux11vnc/settings.json`，下次启动继续使用。
 - 默认使用 ZRLE 等无损编码；低码率档才广告 Tight/JPEG，不请求修改远端分辨率。
 - 原有 Ctrl+Space、`[` / `]`、F11 仍交给远端 Fcitx/Rime。浏览器或 macOS 抢占的快捷键需另行处理。
 - 「只看画面」可禁止本客户端发送键盘、鼠标和剪贴板。
@@ -68,11 +68,11 @@ npm run tauri:dev
 
 ### 配置档和私钥
 
-默认读取 `~/.config/qq-window-viewer/connections.json`；这是为兼容已有安装保留的内部路径，项目品牌为 PenguX11VNC。模板是 `connections.example.json`，字段说明见 [QUICKSTART.md](QUICKSTART.md)。
+默认读取 `~/.config/pengux11vnc/connections.json`；旧版本配置可继续读取，向导保存时会迁移到新路径。模板是 `connections.example.json`，字段说明见 [QUICKSTART.md](QUICKSTART.md)。
 
 ```sh
 python3 tools/import-key.py ~/.ssh/id_ed25519
-ssh-add ~/.config/qq-window-viewer/keys/id_remote  # 加密私钥可选
+ssh-add ~/.config/pengux11vnc/keys/id_remote  # 加密私钥可选
 ```
 
 启动器支持 `--config` 和 `--profile`；私钥路径只进入本机 SSH 命令，不会上传到远端。
@@ -96,7 +96,7 @@ QQ 窗口 → x11vnc :5900 → SSH :15900 → 本机 WS → noVNC
 Fcitx popup → capture-ime → SSH stdout → 本机认证 WS → 等比例 PNG 叠层
 ```
 
-远端新 helper：`~/.local/lib/qq-window-viewer/capture-ime`。
+远端新 helper：`~/.local/lib/pengux11vnc/capture-ime`。
 
 - 只有指定 QQ 窗口获得 X11 焦点时才采集。
 - 仅接受 **可见、override-redirect、WM_CLASS=fcitx** 的单个弹窗，并检查与 QQ 的空间交集。

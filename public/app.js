@@ -40,6 +40,11 @@ let settingsReady = false;
 let settingsStamp = 0;
 let settingsSaveTimer;
 let settingsSyncTimer;
+const SETTINGS_MAIN_KEY = "pengux11vnc-settings-main";
+const SETTINGS_LEGACY_MAIN_KEY = "qq-viewer-settings-main";
+const SETTINGS_LEGACY_KEY = "qq-viewer-settings";
+const SESSION_TOKEN_KEY = "pengux11vnc-token";
+const SESSION_LEGACY_TOKEN_KEY = "qq-viewer-token";
 const defaultSettings = {
   wheel: 25,
   viewOnly: false,
@@ -78,14 +83,25 @@ function normalizeSettings(value = {}) {
 }
 try {
   const savedText =
-    localStorage.getItem("qq-viewer-settings-main") ||
-    localStorage.getItem("qq-viewer-settings") ||
+    localStorage.getItem(SETTINGS_MAIN_KEY) ||
+    localStorage.getItem(SETTINGS_LEGACY_MAIN_KEY) ||
+    localStorage.getItem(SETTINGS_LEGACY_KEY) ||
     "";
   hasSavedSettings = Boolean(savedText);
   settings = normalizeSettings(JSON.parse(savedText || "{}"));
+  if (savedText && !localStorage.getItem(SETTINGS_MAIN_KEY))
+    localStorage.setItem(SETTINGS_MAIN_KEY, savedText);
+  localStorage.removeItem(SETTINGS_LEGACY_MAIN_KEY);
+  localStorage.removeItem(SETTINGS_LEGACY_KEY);
   const fragment = new URLSearchParams(location.hash.slice(1));
-  token = fragment.get("token") || sessionStorage.getItem("qq-viewer-token");
-  if (token) sessionStorage.setItem("qq-viewer-token", token);
+  token =
+    fragment.get("token") ||
+    sessionStorage.getItem(SESSION_TOKEN_KEY) ||
+    sessionStorage.getItem(SESSION_LEGACY_TOKEN_KEY);
+  if (token) {
+    sessionStorage.setItem(SESSION_TOKEN_KEY, token);
+    sessionStorage.removeItem(SESSION_LEGACY_TOKEN_KEY);
+  }
 } catch {
   token = new URLSearchParams(location.hash.slice(1)).get("token");
 }
@@ -96,7 +112,7 @@ function save() {
   if (!isMainSession || !settingsReady) return;
   const serialized = JSON.stringify(settings);
   try {
-    localStorage.setItem("qq-viewer-settings-main", serialized);
+    localStorage.setItem(SETTINGS_MAIN_KEY, serialized);
   } catch {
     /* Storage is optional. */
   }
@@ -404,7 +420,7 @@ function geometry(resizeWindow = false) {
 }
 async function api(path, options = {}) {
   const headers = new Headers(options.headers || {});
-  headers.set("X-QQ-Token", token || "");
+  headers.set("X-PenguX11VNC-Token", token || "");
   return fetch(path, { ...options, headers });
 }
 function credentialCachePath() {

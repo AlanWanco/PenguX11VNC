@@ -17,10 +17,11 @@ from urllib.request import ProxyHandler, Request, build_opener
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME = ROOT / ".runtime"
 STATE = RUNTIME / "session.json"
-DEFAULT_CONFIG = Path.home() / ".config/qq-window-viewer/connections.json"
+DEFAULT_CONFIG = Path.home() / ".config/pengux11vnc/connections.json"
+LEGACY_CONFIG = Path.home() / ".config/qq-window-viewer/connections.json"
 OPENER = build_opener(ProxyHandler({}))
 # Safe fallback for a first run. Configure a real profile in
-# ~/.config/qq-window-viewer/connections.json before connecting.
+# ~/.config/pengux11vnc/connections.json before connecting.
 LEGACY = {
     "id": "remote-qq",
     "name": "Remote QQ",
@@ -42,12 +43,18 @@ LEGACY = {
         "className": "QQ",
     },
     "helpers": {
-        "windowList": "/home/remote-user/.local/lib/qq-window-viewer/list-qq-windows",
-        "imeCapture": "/home/remote-user/.local/lib/qq-window-viewer/capture-ime",
+        "windowList": "/home/remote-user/.local/lib/pengux11vnc/list-qq-windows",
+        "imeCapture": "/home/remote-user/.local/lib/pengux11vnc/capture-ime",
     },
     "children": {"enabled": True, "autoOpen": True, "minWidth": 80, "minHeight": 60},
     "clipboard": {"sync": False},
 }
+
+
+def resolve_config_path(path: Path) -> Path:
+    if path == DEFAULT_CONFIG and not path.exists() and LEGACY_CONFIG.exists():
+        return LEGACY_CONFIG
+    return path
 
 
 def profile_from_file(path: Path, selected: str | None) -> dict:
@@ -86,7 +93,10 @@ def check_server(url: str, profile_id: str) -> bool:
     token = parse_qs(parts.fragment).get("token", [""])[0]
     if not token:
         return False
-    req = Request(f"http://{parts.netloc}/api/status", headers={"X-QQ-Token": token})
+    req = Request(
+        f"http://{parts.netloc}/api/status",
+        headers={"X-PenguX11VNC-Token": token},
+    )
     try:
         with OPENER.open(req, timeout=2) as response:
             data = json.load(response)
@@ -150,12 +160,19 @@ def main() -> None:
     parser.add_argument(
         "--config",
         type=Path,
-        default=Path(os.environ.get("QQ_VIEWER_CONFIG", DEFAULT_CONFIG)),
+        default=Path(
+            os.environ.get(
+                "PENGUX11VNC_CONFIG",
+                os.environ.get("QQ_VIEWER_CONFIG", DEFAULT_CONFIG),
+            )
+        ),
     )
     parser.add_argument("--profile", help="配置档名称")
     parser.add_argument("--no-open", action="store_true", help="只启动服务，不打开窗口")
     args = parser.parse_args()
-    profile = profile_from_file(args.config.expanduser(), args.profile)
+    profile = profile_from_file(
+        resolve_config_path(args.config.expanduser()), args.profile
+    )
     profile_id = profile.get("id", args.profile or "linux-qq")
     local_port = int(nested(profile, "tunnel", "localPort", 15900))
     os.umask(0o077)
@@ -197,13 +214,17 @@ def main() -> None:
             stop_known_server(state)
         node = shutil.which("node") or "/opt/homebrew/bin/node"
         env = os.environ.copy()
-        env["QQ_VIEWER_PORT"] = "0"
-        env["QQ_VNC_PORT"] = str(local_port)
-        env["QQ_IME_ENABLED"] = "1"
-        env["QQ_CONNECTION_JSON"] = json.dumps(profile, ensure_ascii=False)
-        password_file = nested(profile, "vnc", "passwordFile", "/tmp/qq-vnc.pass")
+        env["PENGUX11VNC_PORT"] = "0"
+        env["PENGUX11VNC_VNC_PORT"] = str(local_port)
+        env["PENGUX11VNC_IME_ENABLED"] = "1"
+        env["PENGUX11VNC_CONNECTION_JSON"] = json.dumps(
+            profile, ensure_ascii=False
+        )
+        password_file = nested(
+            profile, "vnc", "passwordFile", "/tmp/pengux11vnc-vnc.pass"
+        )
         if password_file and Path(os.path.expanduser(password_file)).is_file():
-            env["QQ_VNC_PASSWORD_FILE"] = os.path.expanduser(password_file)
+            env["PENGUX11VNC_VNC_PASSWORD_FILE"] = os.path.expanduser(password_file)
         log_path = RUNTIME / "server.log"
         with log_path.open("wb") as log:
             server = subprocess.Popen(

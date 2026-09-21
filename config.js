@@ -4,6 +4,10 @@ import path from "node:path";
 
 export const defaultConfigPath = path.join(
   homedir(),
+  ".config/pengux11vnc/connections.json",
+);
+export const legacyConfigPath = path.join(
+  homedir(),
   ".config/qq-window-viewer/connections.json",
 );
 
@@ -30,8 +34,8 @@ const legacyConnection = {
     className: "QQ",
   },
   helpers: {
-    windowList: "/home/remote-user/.local/lib/qq-window-viewer/list-qq-windows",
-    imeCapture: "/home/remote-user/.local/lib/qq-window-viewer/capture-ime",
+    windowList: "/home/remote-user/.local/lib/pengux11vnc/list-qq-windows",
+    imeCapture: "/home/remote-user/.local/lib/pengux11vnc/capture-ime",
   },
   children: { enabled: true, autoOpen: true, minWidth: 80, minHeight: 60 },
   clipboard: { sync: false },
@@ -167,7 +171,20 @@ export async function loadConnection({
   profile,
 } = {}) {
   try {
-    const raw = JSON.parse(await readFile(expand(configPath), "utf8"));
+    let target = expand(configPath);
+    let raw;
+    try {
+      raw = JSON.parse(await readFile(target, "utf8"));
+    } catch (error) {
+      if (
+        error.code !== "ENOENT" ||
+        profile ||
+        configPath !== defaultConfigPath
+      )
+        throw error;
+      target = legacyConfigPath;
+      raw = JSON.parse(await readFile(target, "utf8"));
+    }
     const profiles = raw.connections || {};
     const selected =
       profile || raw.defaultConnection || Object.keys(profiles)[0];

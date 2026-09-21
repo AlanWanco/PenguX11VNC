@@ -93,14 +93,14 @@
             <label
               >已有密码文件绝对路径<input
                 id="setup-password-path"
-                placeholder="留空使用远端 ~/.config/qq-window-viewer/vnc.pass"
+                placeholder="留空使用远端 ~/.config/pengux11vnc/vnc.pass"
                 autocomplete="off"
             /></label>
             <p class="help">
               这是远端文件路径，不是密码。留空会自动检查远端
               <code>$XDG_RUNTIME_DIR/x11vnc.pass</code>（通常是
               <code>/run/user/&lt;UID&gt;/x11vnc.pass</code>）和
-              <code>~/.config/qq-window-viewer/vnc.pass</code>，不需要猜路径。
+              <code>~/.config/pengux11vnc/vnc.pass</code>，不需要猜路径。
             </p>
           </details>
           <button type="submit" id="setup-probe" class="primary setup-action">
@@ -172,10 +172,10 @@
           密码文件（命令交互输入，勿在命令行写明文密码）：
         </p>
         <pre>
-mkdir -p ~/.config/qq-window-viewer
-chmod 700 ~/.config/qq-window-viewer
-x11vnc -storepasswd ~/.config/qq-window-viewer/vnc.pass
-chmod 600 ~/.config/qq-window-viewer/vnc.pass</pre>
+mkdir -p ~/.config/pengux11vnc
+chmod 700 ~/.config/pengux11vnc
+x11vnc -storepasswd ~/.config/pengux11vnc/vnc.pass
+chmod 600 ~/.config/pengux11vnc/vnc.pass</pre>
         <p>
           如果文件已存在，请先备份，不要直接覆盖。连接时在本软件密码弹窗输入同一个
           VNC 密码。VNC 密码文件只是可逆混淆，不可公开。
@@ -207,7 +207,7 @@ chmod 600 ~/.config/qq-window-viewer/vnc.pass</pre>
       </details>
       <p class="help">
         配置仅存于本机
-        ~/.config/qq-window-viewer/connections.json。保存前备份原文件；令牌、密码、私钥不写入此配置。当前仍需要系统
+        ~/.config/pengux11vnc/connections.json。保存前备份原文件；令牌、密码、私钥不写入此配置。当前仍需要系统
         OpenSSH；安装包已内置 Node.js。
       </p>
       <button id="setup-back">返回首页（不保存）</button>

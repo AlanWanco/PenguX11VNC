@@ -281,6 +281,7 @@ def default_password_files() -> list[Path]:
     runtime_dir = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
     candidates = [
         Path(runtime_dir) / "x11vnc.pass",
+        Path.home() / ".config/pengux11vnc/vnc.pass",
         Path.home() / ".config/qq-window-viewer/vnc.pass",
     ]
     unique: list[Path] = []
@@ -288,6 +289,17 @@ def default_password_files() -> list[Path]:
         if candidate not in unique:
             unique.append(candidate)
     return unique
+
+
+def helper_directory() -> Path:
+    candidates = [
+        Path.home() / ".local/lib/pengux11vnc",
+        Path.home() / ".local/lib/qq-window-viewer",
+    ]
+    for candidate in candidates:
+        if any((candidate / name).is_file() for name in ("list-qq-windows", "capture-ime")):
+            return candidate
+    return candidates[0]
 
 
 def select_password_file(requested: str) -> Path:
@@ -315,7 +327,7 @@ def probe(options: dict) -> dict:
         except (OSError, RuntimeError):
             continue
     password_file = select_password_file(str(options.get("passwordFile") or ""))
-    helper = Path.home() / ".local/lib/qq-window-viewer"
+    helper = helper_directory()
     return {
         "processes": [
             identity

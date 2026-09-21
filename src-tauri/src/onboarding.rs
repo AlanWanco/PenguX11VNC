@@ -57,9 +57,15 @@ impl Onboarding {
 }
 
 fn config_path() -> PathBuf {
-    std::env::var("QQ_VIEWER_CONFIG")
+    std::env::var("PENGUX11VNC_CONFIG")
+        .or_else(|_| std::env::var("QQ_VIEWER_CONFIG"))
         .map(PathBuf::from)
         .unwrap_or_else(|_| home_path(DEFAULT_CONFIG))
+}
+
+fn uses_default_config_path() -> bool {
+    std::env::var_os("PENGUX11VNC_CONFIG").is_none()
+        && std::env::var_os("QQ_VIEWER_CONFIG").is_none()
 }
 
 pub(super) fn empty_profile() -> Profile {
@@ -70,7 +76,23 @@ pub(super) fn empty_profile() -> Profile {
 }
 
 fn write_config(profile: &Profile) -> io::Result<()> {
-    write_config_to(profile, &config_path())
+    let path = config_path();
+    if uses_default_config_path() && !path.exists() {
+        let legacy = home_path(LEGACY_CONFIG);
+        if legacy.exists() {
+            let parent = path
+                .parent()
+                .ok_or_else(|| io::Error::other("配置目录无效"))?;
+            fs::create_dir_all(parent)?;
+            fs::copy(&legacy, &path)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+            }
+        }
+    }
+    write_config_to(profile, &path)
 }
 
 fn write_config_to(profile: &Profile, path: &std::path::Path) -> io::Result<()> {

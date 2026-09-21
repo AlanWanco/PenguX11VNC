@@ -108,14 +108,17 @@ try {
   assert.equal(unauthorized.status, 403);
   const wrongOrigin = await fetch(`${app.origin}/api/main/prepare`, {
     method: "POST",
-    headers: { "X-QQ-Token": app.token, Origin: "https://attacker.example" },
+    headers: {
+      "X-PenguX11VNC-Token": app.token,
+      Origin: "https://attacker.example",
+    },
   });
   assert.equal(wrongOrigin.status, 403);
   const childMutation = await fetch(
     `${app.origin}/api/setup/save?session=window-1`,
     {
       method: "POST",
-      headers: { "X-QQ-Token": app.token },
+      headers: { "X-PenguX11VNC-Token": app.token },
     },
   );
   assert.equal(childMutation.status, 403);
