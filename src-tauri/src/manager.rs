@@ -791,10 +791,16 @@ fn upload_clipboard_files(
 }
 
 fn scp_args(profile: &Profile) -> io::Result<Vec<String>> {
+    // Keep scp's diagnostics available to the caller. `-q` also suppresses
+    // useful authentication/SFTP errors, which made Windows failures appear
+    // as the unhelpful generic "SCP 传输失败" message.
     let mut args = vec![
-        "-q".to_string(),
+        "-o".to_string(),
+        "LogLevel=ERROR".to_string(),
         "-o".to_string(),
         "BatchMode=yes".to_string(),
+        "-o".to_string(),
+        "StrictHostKeyChecking=yes".to_string(),
         "-o".to_string(),
         "ConnectTimeout=6".to_string(),
     ];
@@ -811,21 +817,87 @@ fn scp_args(profile: &Profile) -> io::Result<Vec<String>> {
 }
 
 fn wait_for_process(mut child: Child, timeout: Duration) -> io::Result<()> {
+    let mut stderr = child.stderr.take().map(|stderr| {
+        thread::spawn(move || {
+            let mut bytes = Vec::new();
+            // Keep the diagnostic bounded, while still reading in a separate
+            // thread so a full Windows pipe cannot deadlock scp.
+            let _ = stderr.take(64 * 1024).read_to_end(&mut bytes);
+            bytes
+        })
+    });
     let deadline = Instant::now() + timeout;
     loop {
         if let Some(status) = child.try_wait()? {
+            let diagnostic = stderr
+                .take()
+                .and_then(|reader| reader.join().ok())
+                .unwrap_or_default();
             return if status.success() {
                 Ok(())
             } else {
-                Err(io::Error::other("SCP 传输失败"))
+                Err(io::Error::other(scp_failure_hint(
+                    status.code(),
+                    &diagnostic,
+                )))
             };
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
+            if let Some(reader) = stderr.take() {
+                let _ = reader.join();
+            }
             return Err(io::Error::new(io::ErrorKind::TimedOut, "SCP 传输超时"));
         }
         thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn scp_failure_hint(code: Option<i32>, stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    let lower = text.to_ascii_lowercase();
+    let hint = if lower.contains("host key verification failed")
+        || lower.contains("remote host identification has changed")
+    {
+        "SCP 主机指纹尚未信任或发生变化：请先在终端用同一 Windows 用户连接 SSH，并核对指纹。"
+    } else if lower.contains("permission denied")
+        || lower.contains("sign_and_send_pubkey")
+        || lower.contains("authentication agent")
+    {
+        "SCP 认证失败：请检查私钥路径、ssh-agent 和远端用户权限。"
+    } else if lower.contains("could not resolve") {
+        "SCP 主机名无法解析：请检查主机地址和 DNS。"
+    } else if lower.contains("connection refused")
+        || lower.contains("timed out")
+        || lower.contains("no route to host")
+    {
+        "SCP 网络连接失败：请检查主机、端口、远端 SSH 服务和防火墙。"
+    } else if lower.contains("subsystem request failed")
+        || lower.contains("sftp") && lower.contains("failed")
+    {
+        "远端 SFTP 子系统不可用：请检查远端 sshd 的 SFTP 配置。"
+    } else if lower.contains("no such file or directory") || lower.contains("stat local") {
+        "Windows 本地文件路径无效或已不存在，请重新复制文件后重试。"
+    } else {
+        "SCP 传输失败，请检查 Windows 的 OpenSSH Client 和远端 SSH 配置。"
+    };
+    let detail = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| {
+            line.chars()
+                .filter(|character| !character.is_control())
+                .take(240)
+                .collect::<String>()
+        });
+    let exit = code.map(|value| format!("退出码 {value}"));
+    match (detail, exit) {
+        (Some(detail), Some(exit)) => format!("{hint} {detail}（{exit}）"),
+        (Some(detail), None) => format!("{hint} {detail}"),
+        (None, Some(exit)) => format!("{hint}（{exit}）"),
+        (None, None) => hint.to_string(),
     }
 }
 
@@ -837,8 +909,18 @@ fn scp_clipboard_file(profile: &Profile, local: &Path, remote: &str) -> io::Resu
         .arg(target)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| {
+            if error.kind() == io::ErrorKind::NotFound {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "Windows 未找到 scp.exe，请安装或启用 OpenSSH Client",
+                )
+            } else {
+                error
+            }
+        })?;
     wait_for_process(child, Duration::from_secs(120))
 }
 
@@ -1693,6 +1775,14 @@ mod clipboard_tests {
         }
         assert!(FILE_CLIPBOARD_X11_PYTHON.contains("gnome_payload = b\"copy\\n\""));
         assert!(FILE_CLIPBOARD_X11_PYTHON.contains("kde_cut_payload = b\"0\""));
+    }
+
+    #[test]
+    fn scp_failure_hint_exposes_actionable_diagnostics() {
+        let message = scp_failure_hint(Some(255), b"Permission denied (publickey).\\r\\n");
+        assert!(message.contains("SCP 认证失败"));
+        assert!(message.contains("Permission denied (publickey)."));
+        assert!(message.contains("退出码 255"));
     }
 
     #[test]
