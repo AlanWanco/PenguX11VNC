@@ -19,7 +19,6 @@ import sys
 import time
 from pathlib import Path
 
-
 DEBUG_WINDOWS = os.environ.get("PENGUX11VNC_DEBUG_WINDOWS") == "1"
 
 
