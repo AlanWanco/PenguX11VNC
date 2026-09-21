@@ -1,8 +1,8 @@
 # PenguX11VNC
 
-## 在另一台 Linux 电脑上使用已经打开的 QQ
+## 从本机远程操作另一台 Linux 电脑上的 QQ
 
-PenguX11VNC 让你在自己的 macOS、Windows 或 Linux 电脑上，连接并操作另一台 Linux 电脑上已经打开的 QQ 窗口。
+PenguX11VNC 在本机打开一个窗口，显示并操作另一台 Linux 电脑上正在运行的 QQ 窗口。
 
 它通过 SSH 传输，只显示指定的 QQ 窗口：
 
