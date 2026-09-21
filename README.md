@@ -1,149 +1,143 @@
 # PenguX11VNC
 
-PenguX11VNC 是本地 noVNC 窗口连接工具，复用 CachyOS 上已经运行、仍显示在本地屏幕的 QQ。**不创建 QQ 实例、不启动远端桌面、不修改输入法主题。**
+在本机打开一个窗口，连接到另一台 Linux 电脑上已经运行的 QQ。
 
-## 快速开始
+PenguX11VNC 通过 SSH 连接，只捕获指定的 QQ 窗口：
 
-给使用者看的安装和配置步骤只有一份：**[QUICKSTART.md](QUICKSTART.md)**。先看它，再运行启动器。
+- 不启动第二个 QQ；
+- 不启动远端桌面；
+- 不捕获整个屏幕；
+- 不需要把 VNC 端口暴露到局域网或公网。
+
+## 下载
+
+前往 [Releases](https://github.com/AlanWanco/PenguX11VNC/releases/latest) 下载对应版本：
+
+| 平台 | 文件 |
+| --- | --- |
+| macOS Apple Silicon | `.dmg` |
+| Windows 64 位 | `windows-amd64.exe` |
+| Windows ARM64 | `windows-arm64.exe` |
+| Linux 64 位 | `linux-amd64.AppImage` |
+| Linux ARM64 | `linux-arm64.AppImage` |
+
+目前发布包未签名。首次打开时，系统可能需要手动确认。
+
+## 开始之前
+
+远端 Linux 电脑需要满足以下条件：
+
+- QQ 已登录，并显示在当前图形桌面中；
+- QQ 使用 X11 或 XWayland；
+- SSH 服务可以登录；
+- 已安装 `x11vnc`、Python 3 和 libX11；
+- 已准备一个仅当前用户可读的 VNC 密码文件。
+
+KDE Plasma Wayland + XWayland 是目前验证过的环境。纯 Wayland 原生窗口暂不支持；GNOME、其他 X11 桌面或 Wayland compositor 只要能提供可访问的 X11/XWayland 窗口，通常可以使用，但仍可能需要单独验证。
+
+不需要手动启动常驻 VNC 服务。连接时，PenguX11VNC 会启动自己的 `x11vnc`，并通过 SSH 建立隧道；断开后会清理自己启动的进程。
+
+### 准备 VNC 密码文件
+
+如果远端还没有密码文件，可以在远端执行：
+
+```sh
+mkdir -p ~/.config/pengux11vnc
+chmod 700 ~/.config/pengux11vnc
+x11vnc -storepasswd ~/.config/pengux11vnc/vnc.pass
+chmod 600 ~/.config/pengux11vnc/vnc.pass
+```
+
+密码文件不是明文密码，也不要上传到代码仓库或发送给别人。
+
+## 第一次连接
+
+1. 安装并打开 PenguX11VNC。
+2. 点击「首次连接」或「配置向导」。
+3. 填写远端 SSH 主机、端口、用户名，以及可选的本机私钥。
+4. 点击「只读预检」。
+5. 选择要连接的 QQ 窗口，确认后保存。
+6. 点击「连接窗口」，输入 VNC 密码。
+
+向导会检查 SSH、QQ 进程、图形会话、QQ 窗口、`x11vnc` 和密码文件，但不会替你安装远端软件，也不会启动 QQ。
+
+如果 KDE 第一次提示应用请求控制输入设备，请在远端确认。只查看画面时，可以打开「只看画面」以禁止键盘和鼠标输入。
+
+## 日常使用
+
+- **适应 / 1:1**：在保持比例和原始像素之间切换；窗口可以自由调整大小。
+- **只看画面**：禁止本机向 QQ 发送键盘、鼠标和剪贴板操作。
+- **码率和帧率**：默认优先画质，也可以降低画质或帧率来减少流量。
+- **子窗口**：启用后，QQ 的可见子窗口会分别打开连接窗口；关闭后会自动回收对应会话。
+- **托盘/菜单栏**：关闭主窗口通常只会隐藏应用；选择「退出 PenguX11VNC」才会停止连接。
+- **断开连接**：只停止本次 SSH/VNC 会话，不会关闭远端 QQ。
+
+### 剪贴板和文件
+
+文本剪贴板默认不自动同步，可以在设置中开启。
+
+发送文件时：
+
+1. 在 PenguX11VNC 中按 `Ctrl+V`，确认上传文件；
+2. 文件会通过 SSH 上传到远端 Downloads；
+3. 切换到 QQ，再按一次 `Ctrl+V`。
+
+单次最多 64 个普通文件，合计不超过 50 MiB。PenguX11VNC 不会自动粘贴、发送 QQ 消息或重复上传没有变化的文件。
+
+## 遇到问题
+
+### 找不到 QQ 窗口
+
+确认 QQ 已登录、窗口没有完全隐藏，并且 PenguX11VNC 与 QQ 使用同一个 Linux 用户。QQ 必须是 X11/XWayland 窗口；原生 Wayland 窗口目前不能捕获。
+
+### SSH 可以登录，但预检失败
+
+确认远端安装了 `x11vnc`、Python 3 和 libX11，并且 SSH 登录的是正在运行 QQ 的用户。不要只在没有图形环境的 SSH shell 中检查 `DISPLAY`；使用向导预检更可靠。
+
+### 鼠标位置偏移
+
+远端手动启动 `x11vnc` 时必须保留 `-xwarppointer`。托管模式会自动使用该选项。
+
+### 文件上传后 QQ 没有文件
+
+上传完成后还需要在 QQ 输入框中再次按 `Ctrl+V`。文件会先放入远端 `Downloads`，不会自动发送消息。
+
+### 候选框没有显示
+
+候选框叠层目前是实验功能，只支持 X11/XWayland 的 Fcitx 弹窗，并且 QQ 需要获得焦点。原生 Wayland popup 可能无法显示。
+
+## 配置文件
+
+新版本默认使用以下路径：
+
+- 连接配置：`~/.config/pengux11vnc/connections.json`
+- 界面设置：`~/.config/pengux11vnc/settings.json`
+- 私钥目录：`~/.config/pengux11vnc/keys/`
+- 本机 VNC 密码：`~/.config/pengux11vnc/vnc.pass`
+
+旧版本配置仍可读取；使用向导保存时会迁移到新路径。完整的手动配置说明见 [QUICKSTART.md](QUICKSTART.md)。
+
+## 高级用户与开发者
+
+手动 SSH/VNC 模式、旧版 Chrome/Python 启动器和远端字段说明见 [QUICKSTART.md](QUICKSTART.md)。
+
+源码开发需要 Node.js 22+、Rust/Cargo 和系统 `ssh`：
 
 ```sh
 npm ci
 npm run tauri:dev
 ```
 
-### 新设备不再需要手填 XID
-
-Tauri 会先打开界面，不再等待 SSH/VNC 就绪。缺少配置时进入软件内向导；已有配置可点击「首次连接 / 更换设备」或设置中的「配置向导与故障引导」。
-
-1. 填写 SSH 主机、用户名、端口及可选本机私钥路径。
-2. 点击**只读预检**，检查远端依赖、QQ 进程、图形会话、可见窗口和 VNC 密码文件。
-3. 单一候选自动选择；多个候选必须手动确认。程序不读取聊天标题，不按最大窗口猜测。
-4. 确认只允许 localhost 单窗口 VNC 后保存；旧配置先备份，其他配置档保留。
-5. 返回点击连接，才启动本工具独立管理的 x11vnc/SSH；首次输入远端准备好的 VNC 密码时，可选择保存到本机系统凭据库。
-
-软件内包含 SSH 指纹/agent、远端依赖、密码文件准备、QQ 隐藏和 Wayland 限制的引导。**并非远端零准备**：仍需同用户 Linux 图形会话、已运行的 QQ、SSH、Python 3、libX11、x11vnc 和私有 VNC 密码文件；安装和密码初始化需用户在远端确认执行。
-
-开启自动恢复后，每轮检查完成再等 5 秒。QQ 重启只恢复到同一可执行文件/类名/实例名的唯一可见普通窗口；窗口隐藏或有歧义时暂停，绝不回退全桌面。主动断开会取消恢复并清理本次自建 VNC，不影响 QQ、输入法或已有 VNC/共享隧道。
-
-现有手动配置仍可沿用原来的 VNC；要启用主窗口自动发现、托管和恢复，需完成向导授权。Chrome/Python 回退入口仍使用手工配置，不具备此向导。
-
-完整路线图：**[TODO.md](TODO.md)**；Tauri 迁移方案：**[TAURI-MIGRATION.md](TAURI-MIGRATION.md)**。
-
-## 使用
-
-在 Finder 双击 **`启动 PenguX11VNC.command`**，然后点击「连接窗口」。旧的 `启动 QQ 窗口.command` 仍保留兼容。
-
-Tauri 2 版本可运行。应用图标套件位于 `src-tauri/icons/`，包含 macOS `.icns`、Windows `.ico` 和多尺寸 PNG。
-
-GitHub Actions 的 `Build debug bundles` 会为每次 push/PR 生成 5 个可下载产物：macOS arm64 `.dmg`、Linux amd64/arm64 `.AppImage`、Windows amd64/arm64 NSIS 安装包。每个平台每次只上传一个文件，保留 14 天；产物内置对应架构 Node.js，不需要另装 Node.js。它们未签名，仅用于调试。
-
-```sh
-npm run tauri:dev
-```
-
-它会用 Tauri WebView 打开本地 bridge；Rust 已接管主 SSH 隧道、远端 x11vnc、子窗口 SSH 转发和回收，Node 只暂时保留本地 HTTP/WebSocket 代理。
-
-- 顶部「适应」：保持宽高比；「1:1」：原始像素。Tauri 主窗口原生锁定 VNC 画面加 UI 外框的长宽比，拖动窗口边框时不会再拉出两侧空白；浏览器回退入口仍受浏览器窗口策略限制。
-- 「设置 → 传输码率」默认无损，也可选择高/均衡/低档 JPEG；VNC 按画面变化压缩，不承诺固定 Mbps。
-- 「设置 → 帧率上限」可选 5/10/15/24/30/60 FPS 或不限；通过控制 VNC 增量请求频率限流，不修改远端 QQ 刷新率。
-- 「设置 → 滚轮灵敏度」默认 **25%**，可在 5%～100% 调节，只影响本连接；主窗口设置会保存到 `~/.config/pengux11vnc/settings.json`，下次启动继续使用。
-- 默认使用 ZRLE 等无损编码；低码率档才广告 Tight/JPEG，不请求修改远端分辨率。
-- 原有 Ctrl+Space、`[` / `]`、F11 仍交给远端 Fcitx/Rime。浏览器或 macOS 抢占的快捷键需另行处理。
-- 「只看画面」可禁止本客户端发送键盘、鼠标和剪贴板。
-- 剪贴板**默认不自动同步**；设置中可选开启双向同步，也可手动提交文本。若服务器没有协商 Unicode 扩展，会阻止中文传送，避免出现问号；不会自动粘贴或发送 QQ 消息。
-- Tauri 设置中的「上传剪贴板文件到远端 Downloads」只在点击后读取本机文件剪贴板，单次文件合计限制 50 MiB。应用使用 SCP 上传到远端 `xdg-user-dir DOWNLOAD`（没有该命令时为 `~/Downloads`），再写入远端文件剪贴板；请在 QQ 中手动按 `Ctrl+V`，不会自动发送消息。针对 X11/XWayland QQ，远端先用 `xclip` 写入 `text/uri-list`，并在有 `python3` 时补充 GNOME/KDE 多 MIME 格式；`xclip` 不可用时再尝试 `wl-copy`，最后使用 Python/X11 兼容实现。
-- 工具栏不再提供额外的收起按钮或悬浮球，避免改变 VNC 画面尺寸和缩放状态。点击设置面板外的空白区域会关闭设置；关闭 Tauri 系统标题栏后，顶部保留细栏，可点击右侧按钮展开控制栏。关闭按钮固定在顶部栏最右侧。
-- 默认推荐 Tauri 2 外壳；旧 Chrome 回退入口使用独立 app 窗口和 `.runtime/chrome-profile`，不改个人 Chrome 配置。迁移进度见 [TAURI-MIGRATION.md](TAURI-MIGRATION.md)。
-- 可见的 QQ 同类子窗口可由配置档自动发现，并为每个子窗口打开独立前端窗口；子窗口页面会自动连接，不再需要手动点「连接窗口」。子窗口继承主窗口的码率、帧率、滚轮、缩放、只读和剪贴板设置，主窗口修改后已打开的子窗口也会同步。枚举会递归 X11 窗口树并兼容 `QQ`/`Qq` 类名。隐藏或未映射的窗口不会捕获；Tauri Rust manager 负责 Linux 子窗口对应的远端 VNC、SSH 会话和自动清理。
-- Tauri 默认关闭主窗口时**隐藏到 Windows/Linux 系统托盘或 macOS 菜单栏**，不销毁 WebView、不停止连接；QQ 子窗口仍按原来的方式正常关闭和回收。托盘菜单提供「显示主窗口」「隐藏」「退出 PenguX11VNC」。只有彻底退出才停止本次 Node 代理、清理 Rust 子会话；不会退出远端 QQ 主程序。旧 Chrome 回退入口不受影响。
-
-### 托盘 / 菜单栏
-
-- **Windows**：左键点击托盘图标恢复主窗口，右键打开菜单。黑/白单色图标跟随任务栏的系统主题（不是单独的应用主题），隐藏期间也会检查切换。
-- **macOS**：菜单栏图标采用透明单色 `NSImage` 模板，由系统自动着色；点击图标选择「显示主窗口」，也可点击 Dock 图标恢复。红色关闭按钮只隐藏窗口；菜单「退出」或 `Cmd+Q` 才彻底退出。保留普通 Dock 和系统最小化行为。
-- **Linux**：使用 AppIndicator / StatusNotifier 托盘；KDE 原生支持，GNOME 通常需要 AppIndicator 扩展。通过图标菜单恢复或退出（底层不提供 Linux 左键事件，不能依赖单击直接恢复）。图标跟随桌面浅/深色：KDE 优先读取 `kdeglobals` 窗口背景色，其他桌面使用 GTK/Tauri 主题；自定义且独立于系统配色的面板可能需要另行适配。
-- Windows/Linux 主题检查间隔约 2 秒；图标没有彩色底板。Linux 没有托盘宿主时保留普通关闭/退出行为；隐藏后宿主消失会尝试重新显示主窗口，避免找不回应用。托盘创建失败也不会启用关闭隐藏。
-- 隐藏只作用于主窗口，不会关闭或隐藏独立 QQ 子窗口。连接、已开启的剪贴板同步等仍继续运行；要停止连接请先点「断开」或选择「退出」。
-- 托盘资源源文件是 `src-tauri/icons/tray.svg`（来自 `public/icon.svg` 的气泡轮廓），黑/白透明 PNG 可用 `node tools/build-tray-icons.mjs` 在 headless Chrome 中再生成。
-
-### 配置档和私钥
-
-默认读取 `~/.config/pengux11vnc/connections.json`；旧版本配置可继续读取，向导保存时会迁移到新路径。模板是 `connections.example.json`，字段说明见 [QUICKSTART.md](QUICKSTART.md)。
-
-```sh
-python3 tools/import-key.py ~/.ssh/id_ed25519
-ssh-add ~/.config/pengux11vnc/keys/id_remote  # 加密私钥可选
-```
-
-启动器支持 `--config` 和 `--profile`；私钥路径只进入本机 SSH 命令，不会上传到远端。
-
-### 环境要求
-
-- 源码开发的 Tauri 入口：Rust/Cargo、Node.js 22+、系统 `ssh`；不需要 Chrome/Python。GitHub Actions 下载的安装包已内置对应架构 Node.js，但仍需要系统 `ssh` 和远端依赖。
-- 旧 Chrome 回退入口：Node.js 22+、Python 3、Google Chrome。
-- `npm ci` 安装锁定依赖（noVNC 1.7.0、ws 8.21.3）；`npm run tauri:build` 可构建单一指定格式，GitHub Actions 负责跨平台调试打包。
-- SSH 连接目标由本机配置指定；手动模式要求已有 localhost VNC，向导托管模式在连接时为选定窗口启动独立 localhost VNC。
-- 手动模式/旧启动器优先复用既有 SSH 隧道。向导模式使用独立随机本机端口，不接管已有服务；远端服务只在授权后连接时创建。
-- 手工配置可指定本机 VNC 密码文件，要求当前用户拥有、权限 600。向导模式默认将输入的密码保存到本机系统凭据库，不写入浏览器或 JSON 配置；取消勾选后仅在本次运行中缓存。
-- VNC 密码文件是**可逆混淆**，不是安全加密；不要公开。旧临时密码应另行更换。
-
-## 候选框补采集（实验性）
-
-`x11vnc -id` 只导出 QQ 窗口，Fcitx popup 是独立窗口。当前添加第二条经过 SSH 的只读图片通道；Tauri 入口由 Rust manager 运行 SSH helper，旧 Chrome 回退入口仍由 `ime-bridge.js` 运行：
-
-```
-QQ 窗口 → x11vnc :5900 → SSH :15900 → 本机 WS → noVNC
-Fcitx popup → capture-ime → SSH stdout → 本机认证 WS → 等比例 PNG 叠层
-```
-
-远端新 helper：`~/.local/lib/pengux11vnc/capture-ime`。
-
-- 只有指定 QQ 窗口获得 X11 焦点时才采集。
-- 仅接受 **可见、override-redirect、WM_CLASS=fcitx** 的单个弹窗，并检查与 QQ 的空间交集。
-- 隐藏、失焦、多个候选窗口、捕获错误时不发送图片；不捕获 root/其他应用，也不注入输入。
-- PNG 仅通过内存传输，不写候选词截图或文字日志。相同内容不重复编码发送，每 5 秒心跳。
-- 前端按 QQ framebuffer 的相同比例、相对位置叠加。失连或停止收到心跳时隐藏。
-- **真实可见候选框尚待人工确认**；已验证 helper 编译、隐藏状态、通道握手，以及模拟候选框在三种尺寸中的位置。
-- 当前 helper 只支持 X11/Xwayland popup。若 Fcitx 使用原生 Wayland popup、QQ 失焦、候选框超出可显示区域或开新窗口，可能仍不可见/被裁切。不是通用多窗口桌面共享。
-- Tauri 入口的 Rust manager 从连接档读取 `DISPLAY`、XAUTHORITY、SSH 主机和 QQ XID；旧 Chrome 回退入口由 `ime-bridge.js` 读取同一配置。手动模式下注销或 QQ 完全重启后仍需重新检查配置；向导模式会重新发现会话，歧义时停止并提示。
-
-本次远端 x11vnc 原有 `-xwarppointer` 保持不变，用于避免 Xwayland 的 XTEST 坐标偏移。
-
-## 本地安全边界
-
-- HTTP/WS **只监听 127.0.0.1 的随机端口**，不监听 LAN。
-- WS 同时检查 Host、Origin、每次服务启动生成的 256 位 token；上游目标来自已校验的连接档，不能由网页任意指定目标。
-- token 从 URL fragment 导入后移除，只保留在当前会话；不是 VNC 密码。
-- 密码 API 需要 token，无 CORS；静态服务器只开放 `public/` 和 noVNC JS，不开放源码、配置、runtime 或密码文件。
-- 本地连接未使用 TLS；Linux↔Mac 传输由既有 SSH 隧道加密。不要把本机服务反代到公网。
-- Tauri 的应用数据目录保存会话记录和日志（会话文件/日志在 Unix 上为 600）；旧 Chrome 回退入口的 `.runtime/` 为 700。它们包含私有访问链接，均不要上传。
-- npm 自带 noVNC 源码可供本地修改，当前通过 `public/qq-rfb.js` 小型适配层扩展，不改 `node_modules`。仓库只包含脱敏源码，运行配置不纳入版本控制。
-
-## 开发与验证
+运行测试：
 
 ```sh
 npm test
-npm run test:browser       # 使用已安装的 Chrome，始终 headless
-python3 tools/launch.py --no-open
-node test/onboarding-browser.mjs  # 隔离的向导/恢复浏览器测试，不访问远端
-python3 -m unittest discover -s test -p 'test_remote_session.py'
+npm run test:browser
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
-已覆盖：服务边界/路径访问/认证、VNC 密码文件格式、配置档校验、无损编码协商、帧率请求控制、三种窗口比例、点击坐标、候选框叠层位置、F11/方括号、25% vs 100% 的协议滚轮步数、只读模式、断开重连及 Unicode 降级保护、首次连接向导的预检/歧义选择/授权门、恢复与主动停止。真实连接确认收到非黑图像 `1669×1147`。
-
-滚轮算法按事件累积：像素/行/页统一单位，反向和长空闲清掉余量；单次最多 2 步，输出间隔至少 32ms，无定时队列补滚。25% 是归一化输入的增益，不保证每种鼠标/驱动的主观速度恰好为 TurboVNC 的四分之一。
-
-noVNC 私有钩子 `_handleWheel`、`_sendEncodings`、剪贴板能力字段集中在 `public/qq-rfb.js`，升级依赖必须重新跑浏览器/协议回归测试。
-
-## 停止与回退
-
-Tauri 主窗口关闭会停止本次 Node 代理、IME SSH 和 Rust 子窗口；不会停止共享 SSH 隧道、远端 QQ、Fcitx 或主 x11vnc。旧 Chrome 回退入口可使用 `python3 tools/stop.py`。
-
-重新打开 TurboVNC 即可使用原来的连接。要恢复其正常等比例参数，应使用 `Scale=FixedRatio`，不是 `Auto`。
-
-远端 helper/托管 VNC 不是常驻系统服务。本工具不会更改输入法/桌面配置。真实 QQ 重启后的恢复及多设备组合仍需现场验证；当前自动化测试使用模拟服务，已做现有 Linux 环境的只读预检验证。
+应用只监听本机随机端口，远端 VNC 只监听 localhost，通信由 SSH 加密。请不要把本地服务反代到公网，也不要分享运行时配置、令牌、密码或私钥。
 
 ## 许可
 
-PenguX11VNC 外层代码使用 MIT；noVNC core 使用 MPL-2.0，详见 `node_modules/@novnc/novnc/LICENSE.txt` 及 `docs/` 的许可证；`public/qq-rfb.js` 包含基于上游实现的适配，也以 MPL-2.0 提供；ws 为 MIT。其余外层定制 UI 与辅助代码置于 `LICENSE` 的 MIT 条款下。分发时保留第三方许可，并履行对应 MPL 源码义务。
+PenguX11VNC 外层代码使用 MIT 许可证。noVNC 使用 MPL-2.0，详见仓库中的第三方许可证文件。
