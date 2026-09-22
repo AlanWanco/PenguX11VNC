@@ -45,6 +45,7 @@ let hasSavedSettings = false;
 let settingsReady = false;
 let settingsStamp = 0;
 let settingsSaveTimer;
+let settingsSaveInFlight;
 let settingsSyncTimer;
 const SETTINGS_MAIN_KEY = "pengux11vnc-settings-main";
 const SETTINGS_LEGACY_MAIN_KEY = "qq-viewer-settings-main";
@@ -126,6 +127,23 @@ try {
 if (location.hash)
   history.replaceState(null, "", location.pathname + location.search);
 
+async function persistSettings(options = {}) {
+  if (!isMainSession || !settingsReady) return;
+  try {
+    const response = await api("/api/settings?session=main", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ settings }),
+      keepalive: options.keepalive === true,
+    });
+    if (response.ok) {
+      const data = await response.json();
+      settingsStamp = Number(data.updatedAt) || settingsStamp;
+    }
+  } catch {
+    // localStorage and BroadcastChannel still keep this running session in sync.
+  }
+}
 function save() {
   if (!isMainSession || !settingsReady) return;
   const serialized = JSON.stringify(settings);
@@ -136,21 +154,18 @@ function save() {
   }
   settingsChannel?.postMessage({ settings, tauriScale: tauriVncScaleFactor });
   clearTimeout(settingsSaveTimer);
-  settingsSaveTimer = setTimeout(async () => {
-    try {
-      const response = await api("/api/settings?session=main", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ settings }),
-      });
-      if (response.ok) {
-        const data = await response.json();
-        settingsStamp = Number(data.updatedAt) || settingsStamp;
-      }
-    } catch {
-      // localStorage and BroadcastChannel still keep this running session in sync.
-    }
+  settingsSaveTimer = setTimeout(() => {
+    settingsSaveTimer = undefined;
+    settingsSaveInFlight = persistSettings();
   }, 120);
+}
+async function flushSettings() {
+  if (!isMainSession || !settingsReady) return;
+  clearTimeout(settingsSaveTimer);
+  settingsSaveTimer = undefined;
+  if (settingsSaveInFlight) await settingsSaveInFlight;
+  settingsSaveInFlight = persistSettings();
+  await settingsSaveInFlight;
 }
 if (settingsChannel) {
   settingsChannel.onmessage = (event) => {
@@ -722,6 +737,7 @@ async function loadSessionInfo() {
     // The connection button provides the visible failure state.
   } finally {
     settingsReady = true;
+    if (isMainSession && settings.vncScale !== null) await flushSettings();
   }
 }
 
@@ -1419,6 +1435,7 @@ async function cleanupOpenedChildSessions() {
   }
 }
 async function stopMainConnection() {
+  await flushSettings();
   connectEpoch++;
   stopChildRecoveryMonitor();
   $("connect").disabled = false;
@@ -1625,14 +1642,11 @@ window.addEventListener("pagehide", () => {
   clearTimeout(settingsSyncTimer);
   if (isMainSession && settingsReady && token) {
     clearTimeout(settingsSaveTimer);
-    fetch(`/api/settings?session=main&token=${encodeURIComponent(token)}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ settings }),
-      keepalive: true,
-    }).catch(() => {});
+    settingsSaveTimer = undefined;
+    void persistSettings({ keepalive: true });
   } else {
     clearTimeout(settingsSaveTimer);
+    settingsSaveTimer = undefined;
   }
   settingsChannel?.close();
   if (!isMainSession && token) {

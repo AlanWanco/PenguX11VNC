@@ -350,10 +350,25 @@ export async function testTauriChildren(browser, app) {
     await page.check("#child-auto-open");
     visible = [info("0x7")];
     await waitOpen("0x7");
+    await page.setViewportSize({ width: 900, height: 620 });
+    await page.waitForTimeout(40);
+    const scaleBeforeDisconnect = await page.evaluate(() => {
+      const canvas = document.querySelector("#screen canvas");
+      return canvas.getBoundingClientRect().width / canvas.width;
+    });
     await page.click("#disconnect");
     await waitClosed();
     await page.waitForFunction(
       () => document.querySelector("#status").textContent === "已断开",
+    );
+    const persistedSettings = await fetch(
+      `${app.origin}/api/settings?session=main`,
+      { headers: { "X-PenguX11VNC-Token": app.token } },
+    ).then((response) => response.json());
+    assert(
+      Math.abs(persistedSettings.settings.vncScale - scaleBeforeDisconnect) <
+        0.003,
+      "Disconnect must persist the latest Tauri window scale",
     );
     await page.waitForFunction(() => window.tauriFixture.focusCalls > 0);
     assert.deepEqual(deleted, [

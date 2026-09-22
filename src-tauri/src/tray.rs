@@ -237,7 +237,13 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
                 "tray-hide" => hide_main(app),
                 "tray-quit" => {
                     shutdown(app);
-                    app.exit(0);
+                    if let Some(window) = app.get_webview_window("main") {
+                        if window.close().is_err() {
+                            app.exit(0);
+                        }
+                    } else {
+                        app.exit(0);
+                    }
                     Ok(())
                 }
                 _ => Ok(()),
