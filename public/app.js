@@ -46,6 +46,8 @@ let settingsReady = false;
 let settingsStamp = 0;
 let settingsSaveTimer;
 let settingsSaveInFlight;
+let settingsSaveAgain = false;
+let settingsSaveKeepalive = false;
 let settingsSyncTimer;
 const SETTINGS_MAIN_KEY = "pengux11vnc-settings-main";
 const SETTINGS_LEGACY_MAIN_KEY = "qq-viewer-settings-main";
@@ -144,7 +146,27 @@ async function persistSettings(options = {}) {
     // localStorage and BroadcastChannel still keep this running session in sync.
   }
 }
-function save() {
+function queuePersistSettings(options = {}) {
+  if (settingsSaveInFlight) {
+    settingsSaveAgain = true;
+    settingsSaveKeepalive ||= options.keepalive === true;
+    return settingsSaveInFlight;
+  }
+  settingsSaveInFlight = (async () => {
+    let keepalive = options.keepalive === true;
+    do {
+      settingsSaveAgain = false;
+      keepalive ||= settingsSaveKeepalive;
+      settingsSaveKeepalive = false;
+      await persistSettings({ keepalive });
+      keepalive = false;
+    } while (settingsSaveAgain);
+  })().finally(() => {
+    settingsSaveInFlight = undefined;
+  });
+  return settingsSaveInFlight;
+}
+function save(immediate = false) {
   if (!isMainSession || !settingsReady) return;
   const serialized = JSON.stringify(settings);
   try {
@@ -154,18 +176,22 @@ function save() {
   }
   settingsChannel?.postMessage({ settings, tauriScale: tauriVncScaleFactor });
   clearTimeout(settingsSaveTimer);
-  settingsSaveTimer = setTimeout(() => {
-    settingsSaveTimer = undefined;
-    settingsSaveInFlight = persistSettings();
-  }, 120);
+  settingsSaveTimer = undefined;
+  if (immediate) {
+    queuePersistSettings();
+  } else {
+    settingsSaveTimer = setTimeout(() => {
+      settingsSaveTimer = undefined;
+      queuePersistSettings();
+    }, 120);
+  }
 }
 async function flushSettings() {
   if (!isMainSession || !settingsReady) return;
   clearTimeout(settingsSaveTimer);
   settingsSaveTimer = undefined;
   if (settingsSaveInFlight) await settingsSaveInFlight;
-  settingsSaveInFlight = persistSettings();
-  await settingsSaveInFlight;
+  await queuePersistSettings();
 }
 if (settingsChannel) {
   settingsChannel.onmessage = (event) => {
@@ -326,6 +352,8 @@ function setTitlebarExpanded(expanded, resize = true) {
 }
 let tauriVncResizeInFlight = false;
 let pendingTauriWindowSize;
+let disconnectedTauriWindowResized = false;
+let trackDisconnectedTauriResize = false;
 function currentTauriWindow() {
   return globalThis.__TAURI__?.window?.getCurrentWindow?.();
 }
@@ -521,7 +549,7 @@ function rememberMainTauriScale(value) {
     connected,
   });
   if (settingsReady) {
-    save();
+    save(true);
   } else {
     try {
       localStorage.setItem(SETTINGS_MAIN_KEY, JSON.stringify(settings));
@@ -533,10 +561,12 @@ function rememberMainTauriScale(value) {
 function syncMainTauriScaleFromViewport(canvas) {
   if (!isTauriShell() || !isMainSession || !canvas?.width)
     return tauriVncScaleFactor;
-  const canvasRect = canvas.getBoundingClientRect();
   const screenRect = $("screen").getBoundingClientRect();
-  const displayedWidth = Math.min(canvasRect.width, screenRect.width);
-  const displayedHeight = Math.min(canvasRect.height, screenRect.height);
+  // During a native resize noVNC may update the canvas style one animation
+  // frame after the WebView resize event. Use the actual VNC area instead of
+  // the stale canvas rectangle so the user's native window size is persisted.
+  const displayedWidth = screenRect.width;
+  const displayedHeight = screenRect.height;
   const scale = Math.min(
     displayedWidth / canvas.width,
     displayedHeight / canvas.height,
@@ -737,7 +767,12 @@ async function loadSessionInfo() {
     // The connection button provides the visible failure state.
   } finally {
     settingsReady = true;
-    if (isMainSession && settings.vncScale !== null) await flushSettings();
+    if (isMainSession) {
+      setTimeout(() => {
+        trackDisconnectedTauriResize = true;
+      }, 250);
+      if (settings.vncScale !== null) await flushSettings();
+    }
   }
 }
 
@@ -1196,7 +1231,14 @@ async function connect(prepare = true) {
   if (isTauriShell() && isMainSession) {
     const width = Math.round(window.innerWidth);
     const height = Math.round(window.innerHeight);
-    if (width > 0 && height > 0) pendingTauriWindowSize = { width, height };
+    if (
+      width > 0 &&
+      height > 0 &&
+      (preferredTauriScale === undefined || disconnectedTauriWindowResized)
+    )
+      pendingTauriWindowSize = { width, height };
+    else pendingTauriWindowSize = undefined;
+    disconnectedTauriWindowResized = false;
   }
   if (!token) {
     toast("请使用“启动 PenguX11VNC.command”打开，获取本次本地访问凭证。");
@@ -1588,7 +1630,16 @@ document.addEventListener("fullscreenchange", () => {
   if (connected) geometry(true);
 });
 window.addEventListener("resize", () => {
-  if (!connected) return;
+  if (!connected) {
+    if (
+      isTauriShell() &&
+      isMainSession &&
+      settingsReady &&
+      trackDisconnectedTauriResize
+    )
+      disconnectedTauriWindowResized = true;
+    return;
+  }
   geometry(false);
 });
 $("password-form").addEventListener("submit", async (event) => {
@@ -1643,7 +1694,7 @@ window.addEventListener("pagehide", () => {
   if (isMainSession && settingsReady && token) {
     clearTimeout(settingsSaveTimer);
     settingsSaveTimer = undefined;
-    void persistSettings({ keepalive: true });
+    void queuePersistSettings({ keepalive: true });
   } else {
     clearTimeout(settingsSaveTimer);
     settingsSaveTimer = undefined;

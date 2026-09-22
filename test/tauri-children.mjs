@@ -167,6 +167,14 @@ export async function testTauriChildren(browser, app) {
       () => document.querySelector("#status").textContent === "已连接",
     );
     await page.waitForFunction(() => window.tauriFixture.sizeCalls.length > 0);
+    const initialPersistedSettings = await fetch(
+      `${app.origin}/api/settings?session=main`,
+      { headers: { "X-PenguX11VNC-Token": app.token } },
+    ).then((response) => response.json());
+    assert(
+      Number.isFinite(initialPersistedSettings.settings?.vncScale),
+      "Initial Tauri VNC scale must be persisted",
+    );
     assert.match(
       await page.locator("#window-close").getAttribute("aria-label"),
       /隐藏到(菜单栏|系统托盘)/,
@@ -384,6 +392,38 @@ export async function testTauriChildren(browser, app) {
     assert.equal(
       await page.evaluate(() => window.tauriFixture.destroyCalls),
       0,
+    );
+
+    // A fresh app launch must prefer the persisted scale over the default
+    // native window size. A disconnected resize is tested separately above.
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.reload();
+    await page.waitForFunction(
+      () => !location.hash && !!sessionStorage.getItem("pengux11vnc-token"),
+    );
+    await page.click("#connect");
+    await page.waitForFunction(
+      () => document.querySelector("#status").textContent === "已连接",
+    );
+    const restartedScale = await page.evaluate(() => {
+      const canvas = document.querySelector("#screen canvas");
+      const screen = document.querySelector("#screen").getBoundingClientRect();
+      const call = window.tauriFixture.sizeCalls.at(-1);
+      return {
+        width: (call.width - (window.innerWidth - screen.width)) / canvas.width,
+        height:
+          (call.height - (window.innerHeight - screen.height)) / canvas.height,
+      };
+    });
+    assert(
+      Math.abs(restartedScale.width - persistedSettings.settings.vncScale) <
+        0.003,
+      "A fresh Tauri launch must reuse the persisted VNC scale",
+    );
+    assert(
+      Math.abs(restartedScale.height - persistedSettings.settings.vncScale) <
+        0.003,
+      "A fresh Tauri launch must reuse the persisted VNC scale on height",
     );
     assert.deepEqual(errors, []);
     console.log(
