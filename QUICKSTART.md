@@ -99,21 +99,36 @@ chmod 600 ~/.config/pengux11vnc/connections.json
 
 编辑以下字段：
 
-| 字段                                   | 含义                                                                                                                       |
-| -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `ssh.user` / `ssh.host` / `ssh.port`   | SSH 登录信息                                                                                                               |
-| `ssh.privateKeyFile`                   | 本机私钥路径；留空表示使用 agent/默认密钥                                                                                  |
-| `tunnel.localPort`                     | 本机端口，通常 `15900`                                                                                                     |
-| `tunnel.remoteHost` / `remotePort`     | 远端 x11vnc 地址，通常 `127.0.0.1:5900`                                                                                    |
-| `vnc.passwordFile`                     | 本机 VNC 密码文件；没有则弹窗输入                                                                                          |
+| 字段                                   | 含义                                                                                                                  |
+| -------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `ssh.user` / `ssh.host` / `ssh.port`   | SSH 登录信息                                                                                                          |
+| `ssh.privateKeyFile`                   | 本机私钥路径；留空表示使用 agent/默认密钥                                                                             |
+| `tunnel.localPort`                     | 本机端口，通常 `15900`                                                                                                |
+| `tunnel.remoteHost` / `remotePort`     | 远端 x11vnc 地址，通常 `127.0.0.1:5900`                                                                               |
+| `vnc.passwordFile`                     | 本机 VNC 密码文件；没有则弹窗输入                                                                                     |
 | `vnc.remotePasswordFile`               | Linux 上 x11vnc 使用的密码文件；向导留空会自动检查 `$XDG_RUNTIME_DIR/x11vnc.pass` 与 `~/.config/pengux11vnc/vnc.pass` |
-| `window.display` / `xauthority` / `id` | Linux Xwayland 会话信息                                                                                                    |
-| `helpers.windowList` / `imeCapture`    | 远端 helper 的绝对路径                                                                                                     |
-| `clipboard.sync`                       | 是否允许此配置档启用剪贴板同步，默认 `false`                                                                               |
-| `viewer.bitrate`                       | `lossless`、`high`、`balanced`、`low`；默认无损                                                                            |
-| `viewer.frameRate`                     | `0` 不限，或 `5/10/15/24/30/60`；默认 `30`                                                                                 |
+| `window.display` / `xauthority` / `id` | Linux Xwayland 会话信息                                                                                               |
+| `helpers.windowList` / `imeCapture`    | 远端 helper 的绝对路径                                                                                                |
+| `clipboard.sync`                       | 是否允许此配置档启用剪贴板同步，默认 `false`                                                                          |
+| `viewer.bitrate`                       | `lossless`、`high`、`balanced`、`low`；默认无损                                                                       |
+| `viewer.frameRate`                     | `0` 不限，或 `5/10/15/24/30/60`；默认 `30`                                                                            |
+| `viewer.connectionMode`                | `vnc` 或 `video`；仅在主页连接前选择，默认 `vnc`                                                                      |
+| `video.codec`                          | 当前为 `vp8`                                                                                                          |
+| `video.fps`                            | `30` 或 `60`；默认 `60`                                                                                               |
+| `video.bitrateKbps`                    | 软件编码目标码率；默认 `4000`                                                                                         |
+| `video.udpPortStart` / `udpPortEnd`    | 远端 WebRTC UDP 端口范围；默认 `40000-40100`                                                                          |
 
 主窗口运行时修改的显示设置会保存到 `~/.config/pengux11vnc/settings.json`；QQ 子窗口继承主窗口设置。
+
+### 实验性 WebRTC 视频流
+
+在主页连接前选择「实验性视频流」后，RFB 只负责键盘、鼠标和剪贴板，远端按 QQ X11 窗口 XID 启动临时 GStreamer/VP8/WebRTC 进程，前端用 UDP 接收唯一画面。状态栏会显示当前实际方式。视频失败时不会自动回退到 VNC，而是断开本次连接并回到主页重新选择。当前不捕获整个桌面，也不会创建第二个 QQ。
+
+远端需要额外具备 `gstreamer`、`gst-plugins-base`、`gst-plugins-good`、`gst-plugins-bad` 和 GStreamer 的 Python GI 绑定；未来 H.264 实验才需要额外的 `gst-plugins-ugly`/x264。应用不会自动安装。需要在远端防火墙放行配置的 UDP 端口范围，建议仅允许本机客户端 IP。未放行、WebRTC 协商失败或编码器不可用时，本次视频连接会断开，不会自动切换到 VNC；普通 VNC 连接不受影响。
+
+当前实验只启用 VP8/60 FPS，并通过 SSH 传递信令；视频进程随会话启动和退出，不是远端常驻服务。
+
+Tauri 主窗口支持拖放文件：连接后将一个或多个普通文件拖到窗口，松开并确认后会通过现有 SSH/SCP 流程上传到远端 Downloads，再在 QQ 中手动按 `Ctrl+V`。目录、重复文件和单次合计超过 50 MiB 的内容会被拒绝。
 
 密码文件权限必须是 `600`。JSON 不支持注释；需要说明时另写文档，不要把密码写进 JSON。
 

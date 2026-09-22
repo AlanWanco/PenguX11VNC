@@ -15,6 +15,29 @@ export default class QQRFB extends RFB {
     this._frameRateTimer = undefined;
     this._debugPointerAt = 0;
     this._frameRequestInFlight = false;
+    this._videoMode = false;
+  }
+
+  get videoMode() {
+    return this._videoMode;
+  }
+
+  set videoMode(value) {
+    this._videoMode = value === true;
+    clearTimeout(this._frameRateTimer);
+    this._frameRateTimer = undefined;
+    if (this._rfbConnectionState !== "connected") return;
+    if (this._videoMode) {
+      this._enabledContinuousUpdates = false;
+      return;
+    }
+    if (this._frameRate === 0) {
+      this._enabledContinuousUpdates = false;
+      if (!this._frameRequestInFlight) this._requestFrame();
+    } else {
+      this._enabledContinuousUpdates = true;
+      if (!this._frameRequestInFlight) this._scheduleFrameRequest();
+    }
   }
 
   get frameRate() {
@@ -27,7 +50,7 @@ export default class QQRFB extends RFB {
     this._frameRate = frameRate;
     clearTimeout(this._frameRateTimer);
     this._frameRateTimer = undefined;
-    if (this._rfbConnectionState === "connected") {
+    if (this._rfbConnectionState === "connected" && !this._videoMode) {
       if (frameRate === 0) {
         this._enabledContinuousUpdates = false;
         if (!this._frameRequestInFlight) this._requestFrame();
@@ -40,6 +63,7 @@ export default class QQRFB extends RFB {
 
   _requestFrame() {
     if (
+      this._videoMode ||
       !this._sock ||
       this._rfbConnectionState !== "connected" ||
       this._sock.readyState !== "open"
@@ -71,7 +95,7 @@ export default class QQRFB extends RFB {
   _framebufferUpdate() {
     const result = super._framebufferUpdate();
     if (result) this._frameRequestInFlight = false;
-    if (result && this._frameRate !== 0) {
+    if (result && this._frameRate !== 0 && !this._videoMode) {
       // The upstream handler immediately requests the next update. Mark this
       // one as continuous until our timer sends the next incremental request.
       this._enabledContinuousUpdates = true;

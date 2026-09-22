@@ -46,6 +46,14 @@ const legacyConnection = {
     clipboardSync: false,
     autoChildOpen: true,
     systemTitlebar: true,
+    connectionMode: "vnc",
+  },
+  video: {
+    codec: "vp8",
+    fps: 60,
+    bitrateKbps: 4000,
+    udpPortStart: 40000,
+    udpPortEnd: 40100,
   },
 };
 
@@ -93,6 +101,7 @@ export function normalizeConnection(raw = {}, id = "connection") {
   const children = { ...legacyConnection.children, ...(raw.children || {}) };
   const clipboard = { ...legacyConnection.clipboard, ...(raw.clipboard || {}) };
   const viewer = { ...legacyConnection.viewer, ...(raw.viewer || {}) };
+  const video = { ...legacyConnection.video, ...(raw.video || {}) };
   if (!/^[A-Za-z0-9._-]+$/.test(id))
     throw new Error(`Invalid connection id: ${id}`);
   const user = text(ssh.user, legacyConnection.ssh.user);
@@ -103,6 +112,10 @@ export function normalizeConnection(raw = {}, id = "connection") {
   if (keyFile && (!path.isAbsolute(keyFile) || keyFile.includes("\0")))
     throw new Error("Invalid private key path");
   const remoteHost = host(tunnel.remoteHost, "127.0.0.1");
+  const videoPortStart = port(video.udpPortStart, 40000);
+  const videoPortEnd = port(video.udpPortEnd, 40100);
+  if (videoPortEnd < videoPortStart)
+    throw new Error("Invalid video UDP port range");
   const remotePasswordFile = safeRemotePath(
     vnc.remotePasswordFile,
     legacyConnection.vnc.remotePasswordFile,
@@ -162,6 +175,20 @@ export function normalizeConnection(raw = {}, id = "connection") {
       clipboardSync: viewer.clipboardSync === true,
       autoChildOpen: viewer.autoChildOpen !== false,
       systemTitlebar: viewer.systemTitlebar !== false,
+      connectionMode:
+        viewer.connectionMode === "video" || viewer.videoEnabled === true
+          ? "video"
+          : "vnc",
+    },
+    video: {
+      codec: "vp8",
+      fps: [30, 60].includes(Number(video.fps)) ? Number(video.fps) : 60,
+      bitrateKbps: Math.max(
+        250,
+        Math.min(20_000, Number(video.bitrateKbps) || 4000),
+      ),
+      udpPortStart: videoPortStart,
+      udpPortEnd: videoPortEnd,
     },
   };
 }

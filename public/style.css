@@ -70,6 +70,20 @@ button.danger {
   border-color: #f3a8b624;
   width: 100%;
 }
+button.bar-danger {
+  color: #f28fa3;
+  border-color: #f28fa338;
+  background: #f28fa30d;
+  white-space: nowrap;
+}
+button.bar-danger:not(:disabled):hover {
+  color: #ffd8df;
+  border-color: #f28fa380;
+  background: #f28fa326;
+}
+button.bar-danger:disabled {
+  opacity: 0.38;
+}
 .titlebar {
   height: 68px;
   flex: none;
@@ -304,6 +318,52 @@ main {
   display: block;
   outline: none;
 }
+#video-stream {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+  opacity: 0;
+  pointer-events: none;
+}
+body.video-active #video-stream {
+  opacity: 1;
+}
+#video-stream[hidden] {
+  display: none;
+}
+#file-drop-overlay {
+  position: fixed;
+  inset: 68px 0 0;
+  z-index: 20;
+  display: grid;
+  place-content: center;
+  gap: 8px;
+  color: #f6efff;
+  text-align: center;
+  background: #17121dcc;
+  border: 2px dashed #cba6f7;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+#file-drop-overlay strong {
+  font-size: 22px;
+}
+#file-drop-overlay span {
+  color: #c9bdd5;
+  font-size: 12px;
+}
+body.file-drop-active #file-drop-overlay {
+  opacity: 1;
+}
+body.video-pending #screen canvas,
+body.video-active #screen canvas {
+  opacity: 0;
+}
 body.tauri-vnc-frame #screen {
   inset: 0;
   overflow: hidden;
@@ -317,7 +377,7 @@ body.tauri-vnc-frame main {
 }
 #ime-overlay {
   position: absolute;
-  z-index: 1;
+  z-index: 3;
   pointer-events: none;
   object-fit: contain;
 }
@@ -373,6 +433,37 @@ body.tauri-vnc-frame main {
   line-height: 1.9;
   font-size: 13px;
   margin: 0 0 32px;
+}
+.connection-mode-picker {
+  display: grid;
+  gap: 7px;
+  width: min(360px, 100%);
+  margin: -8px 0 14px;
+  text-align: left;
+  color: #bfb6cc;
+  font-size: 11px;
+}
+.connection-mode-picker select {
+  width: 100%;
+  min-height: 38px;
+}
+.file-drop-zone {
+  display: grid;
+  gap: 4px;
+  margin-top: 10px;
+  padding: 12px;
+  color: #c9bdd5;
+  border: 1px dashed #8d7aa1;
+  border-radius: 8px;
+  font-size: 11px;
+}
+.file-drop-zone strong {
+  color: #eee4f7;
+  font-size: 12px;
+}
+body.file-drop-active .file-drop-zone {
+  border-color: #cba6f7;
+  background: #cba6f714;
 }
 .welcome button {
   padding: 13px 24px;
@@ -569,9 +660,6 @@ input[type="password"] {
 textarea::placeholder {
   color: #797081;
   font-size: 11px;
-}
-.danger {
-  margin-top: 20px;
 }
 .panel-foot {
   text-align: center;

@@ -38,13 +38,21 @@
       "clipboard": {
         "sync": false
       },
+      "video": {
+        "codec": "vp8",
+        "fps": 60,
+        "bitrateKbps": 4000,
+        "udpPortStart": 40000,
+        "udpPortEnd": 40100
+      },
       "viewer": {
         "wheel": 25,
         "bitrate": "lossless",
         "frameRate": 30,
         "clipboardSync": false,
         "autoChildOpen": true,
-        "systemTitlebar": true
+        "systemTitlebar": true,
+        "connectionMode": "vnc"
       }
     }
   }

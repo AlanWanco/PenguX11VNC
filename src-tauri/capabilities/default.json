@@ -16,6 +16,8 @@
     "core:window:allow-start-dragging",
     "allow-set-main-window-aspect",
     "allow-read-clipboard-files",
-    "allow-upload-clipboard-files"
+    "allow-upload-clipboard-files",
+    "allow-inspect-files",
+    "allow-upload-files"
   ]
 }

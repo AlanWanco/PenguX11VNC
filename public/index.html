@@ -70,6 +70,7 @@
         >
           设置
         </button>
+        <button id="disconnect" class="bar-danger" disabled>断开</button>
       </nav>
       <button
         id="window-close"
@@ -83,7 +84,20 @@
       </button>
     </header>
     <main>
-      <div id="screen" aria-label="远程 QQ 画面"></div>
+      <div id="screen" aria-label="远程 QQ 画面">
+        <video
+          id="video-stream"
+          playsinline
+          autoplay
+          muted
+          hidden
+          aria-label="实验性远程视频画面"
+        ></video>
+      </div>
+      <div id="file-drop-overlay" aria-hidden="true">
+        <strong>松开以上传文件</strong>
+        <span>普通文件 · 单次合计不超过 50 MiB</span>
+      </div>
       <img id="ime-overlay" alt="远端输入法候选框" hidden />
       <section id="welcome" class="welcome">
         <div class="welcome-mark"><img src="./icon.svg" alt="" /></div>
@@ -92,10 +106,17 @@
         <p>
           保留 Linux 上的同一个窗口。<br />原始画质，等比例显示，滚动由你掌控。
         </p>
+        <label class="connection-mode-picker" for="connection-mode">
+          <span>连接方式</span>
+          <select id="connection-mode">
+            <option value="vnc">标准 VNC（稳定）</option>
+            <option value="video">实验性视频流（VP8 / UDP / 60 FPS）</option>
+          </select>
+        </label>
+        <small id="welcome-hint"></small>
         <button id="connect" class="primary">
           连接窗口 <span aria-hidden="true">↗</span>
         </button>
-        <small id="welcome-hint">仅通过本机 SSH 隧道连接</small>
         <button id="setup-open" class="secondary" hidden>
           首次连接 / 更换设备
         </button>
@@ -123,6 +144,15 @@
           <p class="help">
             VNC 按画面变化压缩，不能承诺固定 Mbps；低档会启用有损
             JPEG，默认无损。
+          </p>
+        </section>
+        <section class="setting-section">
+          <div class="detail-row">
+            <span>本次连接方式</span
+            ><b id="connection-mode-settings">标准 VNC</b>
+          </div>
+          <p id="video-status" class="help">
+            视频模式为实验功能；RFB 负责键鼠与剪贴板控制。
           </p>
         </section>
         <section class="setting-section">
@@ -224,8 +254,8 @@
             <span>SSH</span><b>读取中</b>
           </div>
           <p class="help">
-            配置文件：~/.config/pengux11vnc/connections.json。私钥只由本机
-            SSH 使用。
+            配置文件：~/.config/pengux11vnc/connections.json。私钥只由本机 SSH
+            使用。
           </p>
         </section>
         <section class="setting-section">
@@ -248,12 +278,15 @@
           <button id="send-clipboard-files" class="secondary" disabled>
             上传剪贴板文件到远端 Downloads
           </button>
+          <div id="file-drop-zone" class="file-drop-zone">
+            <strong>也可以直接拖动文件到应用窗口</strong>
+            <span>松开后确认上传；不会自动发送 QQ 消息。</span>
+          </div>
           <p id="clipboard-files-status" class="help">
             点击按钮或在 QQ 画面按 Ctrl+V 时读取本机文件剪贴板；单次合计不超过
             50 MiB。 文件上传后请再按一次 Ctrl+V 手动粘贴，不会自动发送消息。
           </p>
         </section>
-        <button id="disconnect" class="danger" disabled>断开连接</button>
         <p class="panel-foot">noVNC 1.7 · 本地私有连接 · 不经过云端</p>
       </aside>
     </main>
@@ -261,6 +294,7 @@
       <span
         ><i class="lock">◇</i> SSH 隧道
         <span class="muted">/</span> 单窗口</span
+      ><span id="connection-method">未连接</span><span class="muted">/</span
       ><span id="geometry">原始像素 · 等比例缩放</span>
     </footer>
     <div id="toast" role="status" hidden></div>

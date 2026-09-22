@@ -2,7 +2,7 @@
 use super::*;
 use std::fs::OpenOptions;
 
-const PROBE: &str = include_str!("../../tools/remote-session.py");
+pub(super) const PROBE: &str = include_str!("../../tools/remote-session.py");
 
 pub(super) struct Onboarding {
     pub configured: bool,

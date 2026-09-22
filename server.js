@@ -84,6 +84,10 @@ function normalizeViewerSettings(value = {}) {
     clipboardSync: value.clipboardSync === true,
     autoChildOpen: value.autoChildOpen !== false,
     systemTitlebar: value.systemTitlebar !== false,
+    connectionMode:
+      value.connectionMode === "video" || value.videoEnabled === true
+        ? "video"
+        : "vnc",
   };
 }
 
@@ -802,6 +806,40 @@ export async function startServer({
           { method: "POST" },
         );
         return json(res, 200, result);
+      }
+      const videoOfferMatch = url.pathname.match(
+        /^\/api\/video\/(main|window-[0-9a-f]+)\/offer$/i,
+      );
+      if (videoOfferMatch && req.method === "POST") {
+        const id = videoOfferMatch[1];
+        const session = getSession(id);
+        if (!session) return json(res, 404, { error: "session-not-found" });
+        if (!rustManager)
+          return json(res, 501, { error: "requires-managed-session" });
+        const body = await requestBody(req, 256 * 1024);
+        const result = await managerRequest(
+          rustManager,
+          `/video/${encodeURIComponent(id)}/offer`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          },
+        );
+        return json(res, 200, result);
+      }
+      const videoStopMatch = url.pathname.match(
+        /^\/api\/video\/(main|window-[0-9a-f]+)$/i,
+      );
+      if (videoStopMatch && req.method === "DELETE") {
+        const id = videoStopMatch[1];
+        if (rustManager)
+          await managerRequest(
+            rustManager,
+            `/video/${encodeURIComponent(id)}`,
+            { method: "DELETE" },
+          );
+        return json(res, 200, { ok: true });
       }
       if (url.pathname === "/api/status") {
         const session = getSession(sessionId);

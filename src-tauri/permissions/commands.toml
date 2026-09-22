@@ -14,3 +14,13 @@ commands.allow = ["read_clipboard_files"]
 identifier = "allow-upload-clipboard-files"
 description = "允许将用户确认的文件通过 SSH 上传并写入远端文件剪贴板。"
 commands.allow = ["upload_clipboard_files"]
+
+[[permission]]
+identifier = "allow-inspect-files"
+description = "允许预览用户拖放到应用窗口的普通文件。"
+commands.allow = ["inspect_files"]
+
+[[permission]]
+identifier = "allow-upload-files"
+description = "允许将用户确认的拖放文件通过 SSH 上传并写入远端文件剪贴板。"
+commands.allow = ["upload_files"]

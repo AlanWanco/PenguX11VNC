@@ -103,15 +103,13 @@ fn clipboard_file_signature(
     Ok(signature)
 }
 
-#[tauri::command]
-fn read_clipboard_files() -> Result<Vec<ClipboardFilePreview>, String> {
-    let paths = read_local_clipboard_paths()?;
+fn preview_files(paths: Vec<std::path::PathBuf>) -> Result<Vec<ClipboardFilePreview>, String> {
     let files = manager::validate_clipboard_files(&paths)
-        .map_err(|error| format!("剪贴板文件不可用：{error}"))?;
+        .map_err(|error| format!("文件不可用：{error}"))?;
     let total: u64 = files.iter().map(|file| file.size).sum();
     if total > CLIPBOARD_FILE_LIMIT {
         return Err(format!(
-            "剪贴板文件合计超过 50 MiB（当前 {} MiB）",
+            "文件合计超过 50 MiB（当前 {} MiB）",
             (total as f64 / 1024.0 / 1024.0).ceil() as u64
         ));
     }
@@ -123,6 +121,35 @@ fn read_clipboard_files() -> Result<Vec<ClipboardFilePreview>, String> {
             size: file.size,
         })
         .collect())
+}
+
+#[tauri::command]
+fn read_clipboard_files() -> Result<Vec<ClipboardFilePreview>, String> {
+    preview_files(read_local_clipboard_paths()?)
+}
+
+#[tauri::command]
+fn inspect_files(paths: Vec<String>) -> Result<Vec<ClipboardFilePreview>, String> {
+    preview_files(paths.into_iter().map(std::path::PathBuf::from).collect())
+}
+
+fn upload_files_with_manager(
+    app: &AppHandle,
+    paths: Vec<std::path::PathBuf>,
+) -> Result<ClipboardUploadResult, String> {
+    let state = app
+        .try_state::<RuntimeState>()
+        .ok_or_else(|| "本地连接管理器尚未启动".to_string())?;
+    let manager = state
+        .manager
+        .lock()
+        .map_err(|_| "连接管理器不可用".to_string())?;
+    let manager = manager
+        .as_ref()
+        .ok_or_else(|| "连接管理器已停止".to_string())?;
+    manager
+        .upload_clipboard_files(paths)
+        .map_err(|error| format!("文件上传失败：{error}"))
 }
 
 #[tauri::command]
@@ -142,19 +169,22 @@ async fn upload_clipboard_files(
         if clipboard_file_signature(&requested)? != clipboard_file_signature(&current)? {
             return Err("本机文件剪贴板已变化，请重新点击上传".to_string());
         }
-        let state = app
-            .try_state::<RuntimeState>()
-            .ok_or_else(|| "本地连接管理器尚未启动".to_string())?;
-        let manager = state
-            .manager
-            .lock()
-            .map_err(|_| "连接管理器不可用".to_string())?;
-        let manager = manager
-            .as_ref()
-            .ok_or_else(|| "连接管理器已停止".to_string())?;
-        manager
-            .upload_clipboard_files(paths)
-            .map_err(|error| format!("文件上传失败：{error}"))
+        upload_files_with_manager(&app, paths)
+    })
+    .await
+    .map_err(|error| format!("文件上传任务失败：{error}"))?
+}
+
+#[tauri::command]
+async fn upload_files(app: AppHandle, paths: Vec<String>) -> Result<ClipboardUploadResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let paths = paths
+            .into_iter()
+            .map(std::path::PathBuf::from)
+            .collect::<Vec<_>>();
+        manager::validate_clipboard_files(&paths)
+            .map_err(|error| format!("拖放文件不可用：{error}"))?;
+        upload_files_with_manager(&app, paths)
     })
     .await
     .map_err(|error| format!("文件上传任务失败：{error}"))?
@@ -723,7 +753,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             set_main_window_aspect,
             read_clipboard_files,
-            upload_clipboard_files
+            inspect_files,
+            upload_clipboard_files,
+            upload_files
         ])
         .setup(|app| {
             let root = bridge_root(app.handle())?;

@@ -131,6 +131,7 @@ test("viewer settings persist for the main session", async (t) => {
     clipboardSync: false,
     autoChildOpen: true,
     systemTitlebar: true,
+    connectionMode: "vnc",
   });
   const layoutSaved = await fetch(`${app.origin}/api/layout?session=main`, {
     method: "PUT",

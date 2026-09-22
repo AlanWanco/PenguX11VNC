@@ -11,9 +11,10 @@ use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
+    mpsc::{self, Receiver, RecvTimeoutError},
     Arc, Mutex,
 };
 use std::thread::{self, JoinHandle};
@@ -542,6 +543,19 @@ struct ChildSession {
     tunnel: Child,
 }
 
+struct VideoSession {
+    child: Child,
+    stdin: ChildStdin,
+    messages: Receiver<String>,
+}
+
+impl Drop for VideoSession {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 pub fn validate_clipboard_files(paths: &[PathBuf]) -> io::Result<Vec<LocalClipboardFile>> {
     if paths.is_empty() {
         return Err(io::Error::new(
@@ -619,6 +633,7 @@ fn percent_encode_file_uri(path: &str) -> String {
 struct ManagerState {
     profile: Profile,
     children: HashMap<String, ChildSession>,
+    videos: HashMap<String, VideoSession>,
     onboarding: Onboarding,
 }
 
@@ -627,6 +642,7 @@ impl ManagerState {
         Self {
             profile,
             children: HashMap::new(),
+            videos: HashMap::new(),
             onboarding: Onboarding::new(configured, startup_error),
         }
     }
@@ -800,7 +816,163 @@ impl ManagerState {
             .map_err(|_| io::Error::other("没有可用的远端 VNC 端口"))
     }
 
+    fn video_target(&self, session_id: &str) -> io::Result<Value> {
+        if session_id == "main" {
+            return Ok(json!({
+                "id": self.profile.window_id(),
+                "display": self.profile.display(),
+                "xauthority": self.profile.xauthority(),
+                "className": self.profile.class_name(),
+            }));
+        }
+        let child = self
+            .children
+            .get(session_id)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "QQ 视频会话不存在"))?;
+        let mut target = json!({
+            "id": child.info.window_id,
+            "display": self.profile.display(),
+            "xauthority": self.profile.xauthority(),
+            "className": self.profile.class_name(),
+        });
+        if let Some(pid) = child.info.geometry.pid {
+            target["pid"] = json!(pid);
+        }
+        if let Some(start) = &child.info.geometry.start {
+            target["start"] = json!(start);
+        }
+        if let Some(exe) = &child.info.geometry.exe {
+            target["exe"] = json!(exe);
+        }
+        Ok(target)
+    }
+
+    fn video_options(&self) -> Value {
+        let section = self.profile.raw.get("video");
+        let fps = section
+            .and_then(|value| value.get("fps"))
+            .and_then(Value::as_u64)
+            .unwrap_or(60)
+            .clamp(1, 60);
+        let bitrate = section
+            .and_then(|value| value.get("bitrateKbps"))
+            .and_then(Value::as_u64)
+            .unwrap_or(4000)
+            .clamp(250, 20_000)
+            * 1000;
+        let port_min = section
+            .and_then(|value| value.get("udpPortStart"))
+            .and_then(Value::as_u64)
+            .unwrap_or(40_000)
+            .clamp(1024, 65_535);
+        let port_max = section
+            .and_then(|value| value.get("udpPortEnd"))
+            .and_then(Value::as_u64)
+            .unwrap_or(40_100)
+            .clamp(port_min, 65_535);
+        json!({
+            "fps": fps,
+            "bitrate": bitrate,
+            "portMin": port_min,
+            "portMax": port_max,
+        })
+    }
+
+    fn video_offer(&mut self, session_id: &str, body: Value) -> io::Result<Value> {
+        let offer_type = body.get("type").and_then(Value::as_str);
+        let sdp = body.get("sdp").and_then(Value::as_str).unwrap_or_default();
+        if offer_type != Some("offer") || sdp.is_empty() || sdp.len() > 256 * 1024 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "WebRTC offer 无效",
+            ));
+        }
+        let target = self.video_target(session_id)?;
+        let mut options = self.video_options();
+        options["target"] = target;
+        if let Some(previous) = self.videos.remove(session_id) {
+            stop_video_session(previous);
+        }
+        let mut session = spawn_video_session(&self.profile, &options)?;
+        if let Err(error) = write_video_command(
+            &mut session.stdin,
+            &json!({ "action": "offer", "type": "offer", "sdp": sdp }),
+        ) {
+            stop_video_session(session);
+            return Err(error);
+        }
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                stop_video_session(session);
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "远端 WebRTC 回应超时",
+                ));
+            }
+            match session.messages.recv_timeout(remaining) {
+                Ok(line) => {
+                    let message: Value = match serde_json::from_str(&line) {
+                        Ok(message) => message,
+                        Err(_) => {
+                            stop_video_session(session);
+                            return Err(io::Error::other("远端 WebRTC 响应无效"));
+                        }
+                    };
+                    match message.get("type").and_then(Value::as_str) {
+                        Some("ready") => {}
+                        Some("answer") => {
+                            let Some(answer) = message
+                                .get("sdp")
+                                .and_then(Value::as_str)
+                                .filter(|value| !value.is_empty())
+                            else {
+                                stop_video_session(session);
+                                return Err(io::Error::other("远端 WebRTC answer 缺少 SDP"));
+                            };
+                            self.videos.insert(session_id.to_string(), session);
+                            return Ok(json!({
+                                "answer": {"type": "answer", "sdp": answer},
+                                "codec": message.get("codec").cloned().unwrap_or(json!("vp8")),
+                                "portMin": options["portMin"],
+                                "portMax": options["portMax"],
+                            }));
+                        }
+                        Some("error") => {
+                            let error = message
+                                .get("error")
+                                .and_then(Value::as_str)
+                                .unwrap_or("remote-video-failed");
+                            stop_video_session(session);
+                            return Err(io::Error::other(error.to_string()));
+                        }
+                        _ => {}
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    stop_video_session(session);
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "远端 WebRTC 回应超时",
+                    ));
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    stop_video_session(session);
+                    return Err(io::Error::other("远端视频进程已退出"));
+                }
+            }
+        }
+    }
+
+    fn cleanup_video(&mut self, id: &str) {
+        if let Some(session) = self.videos.remove(id) {
+            stop_video_session(session);
+        }
+    }
+
     fn cleanup(&mut self, id: &str) {
+        self.cleanup_video(id);
         if let Some(mut child) = self.children.remove(id) {
             let cleanup_command = format!(
                 concat!(
@@ -831,6 +1003,10 @@ impl ManagerState {
 
     fn cleanup_all(&mut self) {
         self.onboarding.stop();
+        let video_ids: Vec<String> = self.videos.keys().cloned().collect();
+        for id in video_ids {
+            self.cleanup_video(&id);
+        }
         let ids: Vec<String> = self.children.keys().cloned().collect();
         for id in ids {
             self.cleanup(&id);
@@ -1300,6 +1476,59 @@ fn discover_windows(profile: &Profile) -> io::Result<Vec<WindowInfo>> {
         windows.push(window);
     }
     Ok(windows)
+}
+
+fn spawn_video_session(profile: &Profile, options: &Value) -> io::Result<VideoSession> {
+    let mut args = ssh_args(profile, None, false)?;
+    let command = format!(
+        "python3 -c {} video {}",
+        shell_quote(onboarding::PROBE),
+        shell_quote(&options.to_string())
+    );
+    args.push(command);
+    let mut child = hidden_command("ssh")
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let Some(stdin) = child.stdin.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(io::Error::other("远端视频输入通道不可用"));
+    };
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(io::Error::other("远端视频输出通道不可用"));
+    };
+    let (sender, messages) = mpsc::channel();
+    thread::spawn(move || {
+        let reader = BufReader::new(stdout);
+        for line in reader.lines() {
+            let Ok(line) = line else { break };
+            if sender.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    Ok(VideoSession {
+        child,
+        stdin,
+        messages,
+    })
+}
+
+fn write_video_command(stdin: &mut ChildStdin, command: &Value) -> io::Result<()> {
+    serde_json::to_writer(&mut *stdin, command).map_err(io::Error::other)?;
+    stdin.write_all(b"\n")?;
+    stdin.flush()
+}
+
+fn stop_video_session(mut session: VideoSession) {
+    let _ = write_video_command(&mut session.stdin, &json!({"action": "stop"}));
+    let _ = session.child.kill();
+    let _ = session.child.wait();
 }
 
 fn kill_remote_vnc_process(profile: &Profile, remote_pid: u32) {
@@ -1804,6 +2033,26 @@ fn handle_request(mut stream: TcpStream, state: Arc<Mutex<ManagerState>>, token:
                 .lock()
                 .map_err(|_| io::Error::other("manager locked"))
                 .and_then(|mut manager| manager.activate(id))
+        }
+        _ if method == "POST" && path.starts_with("/video/") && path.ends_with("/offer") => {
+            let id = path
+                .strip_prefix("/video/")
+                .and_then(|value| value.strip_suffix("/offer"))
+                .unwrap_or_default();
+            state
+                .lock()
+                .map_err(|_| io::Error::other("manager locked"))
+                .and_then(|mut manager| manager.video_offer(id, body))
+        }
+        _ if method == "DELETE" && path.starts_with("/video/") => {
+            let id = path.strip_prefix("/video/").unwrap_or_default();
+            state
+                .lock()
+                .map_err(|_| io::Error::other("manager locked"))
+                .map(|mut manager| {
+                    manager.cleanup_video(id);
+                    json!({"ok": true})
+                })
         }
         _ if method == "DELETE" && path.starts_with("/sessions/") => {
             let id = path.strip_prefix("/sessions/").unwrap_or_default();

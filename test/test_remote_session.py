@@ -45,6 +45,13 @@ class RemoteSessionTests(unittest.TestCase):
             ):
                 self.assertEqual(REMOTE.select_password_file(""), password)
 
+    def test_vp8_payload_type_follows_video_offer(self) -> None:
+        offer = "m=audio 9\n" "a=rtpmap:96 opus/48000\n" "m=video 9\n" "a=rtpmap:107 VP8/90000\n"
+        self.assertEqual(REMOTE.vp8_payload_type(offer), 107)
+        self.assertIsNone(
+            REMOTE.vp8_payload_type("m=video 9\n" "a=rtpmap:107 H264/90000\n")
+        )
+
     def test_recycled_xid_is_not_same_window(self) -> None:
         target = {
             "id": "0x10",

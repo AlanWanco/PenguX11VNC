@@ -10,6 +10,7 @@ import ctypes as C
 import ctypes.util
 import json
 import os
+import re
 import selectors
 import shutil
 import signal
@@ -17,6 +18,7 @@ import stat
 import subprocess
 import sys
 import time
+from itertools import pairwise
 from pathlib import Path
 
 DEBUG_WINDOWS = os.environ.get("PENGUX11VNC_DEBUG_WINDOWS") == "1"
@@ -605,6 +607,237 @@ def serve(options: dict) -> None:
                 child.wait()
 
 
+def vp8_payload_type(sdp_text: str) -> int | None:
+    in_video = False
+    for raw_line in sdp_text.splitlines():
+        line = raw_line.strip()
+        if line.startswith("m="):
+            in_video = line.startswith("m=video ")
+            continue
+        if not in_video:
+            continue
+        match = re.match(r"a=rtpmap:(\d+)\s+VP8/90000(?:\s|$)", line, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def video(options: dict) -> None:
+    """Run an opt-in VP8/WebRTC sender for one validated X11 window."""
+    target = options.get("target")
+    if not isinstance(target, dict):
+        raise TypeError("invalid-target")
+    display = str(target.get("display") or "")
+    xauthority = str(target.get("xauthority") or "")
+    if not display.startswith(":") or not xauthority:
+        raise RuntimeError("invalid-display")
+
+    x11 = X11(target)
+    try:
+        window, attrs, hidden = x11._target_window(target)
+        if attrs.map_state != 2 or hidden:
+            raise RuntimeError("target-not-visible")
+    finally:
+        x11.close()
+
+    try:
+        import gi
+
+        gi.require_version("Gst", "1.0")
+        gi.require_version("GstSdp", "1.0")
+        gi.require_version("GstWebRTC", "1.0")
+        from gi.repository import GLib, Gst, GstSdp, GstWebRTC
+    except (ImportError, ValueError) as error:
+        raise RuntimeError("gstreamer-python-unavailable") from error
+
+    Gst.init(None)
+    fps = max(1, min(60, int(options.get("fps") or 60)))
+    bitrate = max(250_000, min(20_000_000, int(options.get("bitrate") or 4_000_000)))
+    port_min = max(1024, min(65535, int(options.get("portMin") or 40_000)))
+    port_max = max(port_min, min(65535, int(options.get("portMax") or 40_100)))
+    source = Gst.ElementFactory.make("ximagesrc", "source")
+    caps_filter = Gst.ElementFactory.make("capsfilter", "raw-caps")
+    convert = Gst.ElementFactory.make("videoconvert", "convert")
+    queue = Gst.ElementFactory.make("queue", "queue")
+    encoder = Gst.ElementFactory.make("vp8enc", "encoder")
+    payloader = Gst.ElementFactory.make("rtpvp8pay", "payloader")
+    rtp_caps = Gst.ElementFactory.make("capsfilter", "rtp-caps")
+    webrtc = Gst.ElementFactory.make("webrtcbin", "webrtc")
+    elements = [
+        source,
+        caps_filter,
+        convert,
+        queue,
+        encoder,
+        payloader,
+        rtp_caps,
+        webrtc,
+    ]
+    if any(element is None for element in elements):
+        raise RuntimeError("gstreamer-video-elements-unavailable")
+
+    source.set_property("display-name", display)
+    source.set_property("xid", window)
+    source.set_property("use-damage", True)
+    source.set_property("show-pointer", False)
+    caps_filter.set_property(
+        "caps", Gst.Caps.from_string(f"video/x-raw,framerate={fps}/1")
+    )
+    queue.set_property("max-size-buffers", 2)
+    queue.set_property("leaky", 2)
+    encoder.set_property("deadline", 1)
+    encoder.set_property("cpu-used", 8)
+    encoder.set_property("target-bitrate", bitrate)
+    encoder.set_property("keyframe-max-dist", fps)
+    payloader.set_property("pt", 96)
+    rtp_caps.set_property(
+        "caps",
+        Gst.Caps.from_string(
+            "application/x-rtp,media=video,encoding-name=VP8,payload=96,clock-rate=90000"
+        ),
+    )
+    webrtc.set_property("bundle-policy", GstWebRTC.WebRTCBundlePolicy.MAX_BUNDLE)
+    ice_agent = webrtc.get_property("ice-agent")
+    if ice_agent is not None:
+        properties = {prop.name for prop in ice_agent.list_properties()}
+        if "min-port" in properties:
+            ice_agent.set_property("min-port", port_min)
+        if "max-port" in properties:
+            ice_agent.set_property("max-port", port_max)
+
+    pipeline = Gst.Pipeline.new("pengux11vnc-video")
+    for element in elements:
+        pipeline.add(element)
+    for left, right in pairwise(elements[:-1]):
+        if not left.link(right):
+            raise RuntimeError("gstreamer-video-link-failed")
+    sink_pad = webrtc.get_request_pad("sink_%u")
+    source_pad = rtp_caps.get_static_pad("src")
+    if sink_pad is None or source_pad is None or source_pad.link(sink_pad) != Gst.PadLinkReturn.OK:
+        raise RuntimeError("gstreamer-webrtc-link-failed")
+
+    loop = GLib.MainLoop()
+    pending_answer = {"sdp": None}
+    answer_sent = {"value": False}
+
+    def send(message: dict) -> None:
+        print(json.dumps(message, separators=(",", ":")), flush=True)
+
+    def maybe_send_answer() -> None:
+        if answer_sent["value"] or not pending_answer["sdp"]:
+            return
+        state = webrtc.get_property("ice-gathering-state")
+        if state != GstWebRTC.WebRTCICEGatheringState.COMPLETE:
+            return
+        answer_sent["value"] = True
+        send({"type": "answer", "sdp": pending_answer["sdp"], "codec": "vp8"})
+
+    def on_answer_created(promise: object, _user_data: object = None) -> None:
+        reply = promise.get_reply()
+        if reply is None:
+            send({"type": "error", "error": "webrtc-answer-unavailable"})
+            loop.quit()
+            return
+        answer = reply.get_value("answer")
+        if answer is None:
+            send({"type": "error", "error": "webrtc-answer-unavailable"})
+            loop.quit()
+            return
+        webrtc.emit("set-local-description", answer, Gst.Promise.new())
+        pending_answer["sdp"] = answer.sdp.as_text()
+        maybe_send_answer()
+
+    def on_gathering_state_changed(_element: object, _spec: object) -> None:
+        maybe_send_answer()
+
+    def create_answer_after_offer(_promise: object, _user_data: object = None) -> None:
+        try:
+            transceiver = webrtc.emit("get-transceiver", 0)
+            if transceiver is None:
+                raise RuntimeError("missing-video-transceiver")
+            transceiver.set_property(
+                "direction", GstWebRTC.WebRTCRTPTransceiverDirection.SENDONLY
+            )
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            send({"type": "error", "error": "webrtc-transceiver-unavailable"})
+            loop.quit()
+            return
+        promise = Gst.Promise.new_with_change_func(on_answer_created, None)
+        webrtc.emit("create-answer", None, promise)
+
+    def handle_offer(message: dict) -> None:
+        sdp_text = message.get("sdp")
+        if message.get("type") != "offer" or not isinstance(sdp_text, str):
+            send({"type": "error", "error": "invalid-webrtc-offer"})
+            loop.quit()
+            return
+        payload_type = vp8_payload_type(sdp_text)
+        if payload_type is None:
+            send({"type": "error", "error": "vp8-not-offered"})
+            loop.quit()
+            return
+        payloader.set_property("pt", payload_type)
+        rtp_caps.set_property(
+            "caps",
+            Gst.Caps.from_string(
+                "application/x-rtp,media=video,encoding-name=VP8,"
+                f"payload={payload_type},clock-rate=90000"
+            ),
+        )
+        result, sdp_message = GstSdp.sdp_message_new_from_text(sdp_text)
+        if result != GstSdp.SDPResult.OK or sdp_message is None:
+            send({"type": "error", "error": "invalid-webrtc-sdp"})
+            loop.quit()
+            return
+        description = GstWebRTC.WebRTCSessionDescription.new(
+            GstWebRTC.WebRTCSDPType.OFFER, sdp_message
+        )
+        promise = Gst.Promise.new_with_change_func(create_answer_after_offer, None)
+        webrtc.emit("set-remote-description", description, promise)
+
+    def on_input(_fd: int, condition: object) -> bool:
+        if condition & (GLib.IO_HUP | GLib.IO_ERR):
+            loop.quit()
+            return False
+        line = sys.stdin.readline()
+        if not line:
+            loop.quit()
+            return False
+        try:
+            message = json.loads(line)
+            if message.get("action") == "stop":
+                loop.quit()
+            elif message.get("action") == "offer":
+                handle_offer(message)
+        except (TypeError, UnicodeError, ValueError):
+            send({"type": "error", "error": "invalid-video-command"})
+            loop.quit()
+        return True
+
+    bus = pipeline.get_bus()
+    bus.add_signal_watch()
+
+    def on_bus_message(_bus: object, message: object) -> None:
+        if message.type == Gst.MessageType.ERROR:
+            send({"type": "error", "error": "gstreamer-video-failed"})
+            loop.quit()
+        elif message.type == Gst.MessageType.EOS:
+            loop.quit()
+
+    bus.connect("message", on_bus_message)
+    webrtc.connect("notify::ice-gathering-state", on_gathering_state_changed)
+    pipeline.set_state(Gst.State.PLAYING)
+    send({"type": "ready", "codec": "vp8", "fps": fps, "window": hex(window)})
+    GLib.io_add_watch(
+        sys.stdin.fileno(), GLib.IO_IN | GLib.IO_HUP | GLib.IO_ERR, on_input
+    )
+    try:
+        loop.run()
+    finally:
+        pipeline.set_state(Gst.State.NULL)
+        bus.remove_signal_watch()
+
+
 def main() -> None:
     try:
         action, options = sys.argv[1], json.loads(sys.argv[2])
@@ -614,9 +847,11 @@ def main() -> None:
             print(json.dumps(activate(options)), flush=True)
         elif action == "serve":
             serve(options)
+        elif action == "video":
+            video(options)
         else:
             raise RuntimeError("invalid-action")
-    except (OSError, ValueError, KeyError, RuntimeError):
+    except (OSError, TypeError, ValueError, KeyError, RuntimeError):
         # Do not echo subprocess arguments, environment or credentials.
         print(json.dumps({"error": "remote-probe-or-service-failed"}), flush=True)
         sys.exit(1)

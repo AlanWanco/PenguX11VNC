@@ -15,13 +15,13 @@ PenguX11VNC 在本机打开一个窗口，显示并操作另一台 Linux 电脑�
 
 从 [Releases](https://github.com/AlanWanco/PenguX11VNC/releases/latest) 下载对应平台的安装包：
 
-| 设备 | 文件 |
-| --- | --- |
-| macOS Apple Silicon | `.dmg` |
-| Windows 64 位 | `windows-amd64.exe` |
-| Windows ARM64 | `windows-arm64.exe` |
-| Linux 64 位 | `linux-amd64.AppImage` |
-| Linux ARM64 | `linux-arm64.AppImage` |
+| 设备                | 文件                   |
+| ------------------- | ---------------------- |
+| macOS Apple Silicon | `.dmg`                 |
+| Windows 64 位       | `windows-amd64.exe`    |
+| Windows ARM64       | `windows-arm64.exe`    |
+| Linux 64 位         | `linux-amd64.AppImage` |
+| Linux ARM64         | `linux-arm64.AppImage` |
 
 目前安装包未签名。系统第一次打开时，可能需要手动允许运行。
 
@@ -89,6 +89,8 @@ chmod 600 ~/.config/pengux11vnc/vnc.pass
 - **适应 / 1:1**：切换窗口适应和原始像素显示；窗口可以自由调整大小。
 - **只看画面**：禁止本机发送鼠标、键盘和剪贴板操作。
 - **码率 / 帧率**：网络较慢时可以降低画质或帧率。
+- **实验性视频流**：主页连接前选择 WebRTC/VP8/60 FPS；RFB 只负责键鼠与剪贴板，连接后不支持中途切换，需要远端 GStreamer 和 UDP 防火墙规则，失败不会自动回退到 VNC，而是回到主页重新选择，默认使用标准 VNC。
+- **文件拖放**：Tauri 连接后可将普通文件拖入窗口，确认后上传到远端 Downloads，再在 QQ 中手动按 `Ctrl+V`。
 - **子窗口**：开启后，QQ 的可见子窗口会分别打开连接窗口。
 - **窗口切换**：连接期间如果 QQ 被最小化，程序会尝试恢复；在本机切换主窗口或子窗口时，对应的远端窗口会置前，减少窗口重叠造成的误点击。
 - **关闭窗口**：通常只会隐藏到托盘或菜单栏；选择「退出 PenguX11VNC」才会停止连接。

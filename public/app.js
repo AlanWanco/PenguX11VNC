@@ -3,6 +3,13 @@ import { ImeOverlay } from "./ime-overlay.js";
 
 const $ = (id) => document.getElementById(id);
 let rfb;
+let videoPeer;
+let videoEpoch = 0;
+let videoActive = false;
+let videoReceiverTimer;
+let videoFailureMessage;
+let manualDisconnectPending = false;
+let activeConnectionMode = "vnc";
 let connected = false;
 let connecting = false;
 let connectEpoch = 0;
@@ -17,6 +24,7 @@ let clipboardTimer;
 let remoteActivationTimer;
 let remoteActivationInFlight = false;
 let clipboardPasteShortcutInFlight = false;
+let fileUploadInFlight = false;
 let replayingClipboardPasteShortcut = false;
 let remoteFilePasteSignature;
 let token;
@@ -64,6 +72,7 @@ const defaultSettings = {
   clipboardSync: false,
   autoChildOpen: true,
   systemTitlebar: true,
+  connectionMode: "vnc",
 };
 let settings = { ...defaultSettings };
 let settingsChannel;
@@ -96,6 +105,10 @@ function normalizeSettings(value = {}) {
     clipboardSync: value.clipboardSync === true,
     autoChildOpen: value.autoChildOpen !== false,
     systemTitlebar: value.systemTitlebar !== false,
+    connectionMode:
+      value.connectionMode === "video" || value.videoEnabled === true
+        ? "video"
+        : "vnc",
   };
 }
 try {
@@ -234,11 +247,22 @@ const frameRateLabels = {
   30: "30 FPS",
   60: "60 FPS",
 };
+const connectionModeLabels = {
+  vnc: "标准 VNC",
+  video: "实验视频流",
+};
 function syncSettingsControls() {
   $("wheel").value = settings.wheel;
   $("wheel-value").textContent = `${settings.wheel}%`;
   $("view-only").checked = settings.viewOnly;
   $("clipboard-sync").checked = settings.clipboardSync;
+  $("connection-mode").value = settings.connectionMode;
+  $("connection-mode-settings").textContent =
+    connectionModeLabels[
+      connected ? activeConnectionMode : settings.connectionMode
+    ];
+  $("connection-mode").disabled =
+    connected || !isMainSession || !isTauriShell();
   $("child-auto-open").checked = settings.autoChildOpen;
   $("system-titlebar").checked = settings.systemTitlebar;
   void applyTauriTitlebar(settings.systemTitlebar);
@@ -589,6 +613,17 @@ function geometry(resizeWindow = false) {
   );
   $("geometry").textContent =
     `${canvas.width} × ${canvas.height} · ${percent}% · ${bitrateLabels[settings.bitrate]} · ${frameRateLabels[settings.frameRate]}`;
+  const video = $("video-stream");
+  if (!video.hidden) {
+    const screenRect = $("screen").getBoundingClientRect();
+    const canvasRect = canvas.getBoundingClientRect();
+    video.style.left = `${canvasRect.left - screenRect.left}px`;
+    video.style.top = `${canvasRect.top - screenRect.top}px`;
+    video.style.right = "auto";
+    video.style.bottom = "auto";
+    video.style.width = `${canvasRect.width}px`;
+    video.style.height = `${canvasRect.height}px`;
+  }
   if (resizeWindow) {
     if (
       isTauriShell() &&
@@ -744,6 +779,7 @@ async function loadSessionInfo() {
         "actual",
         "bitrate",
         "frame-rate",
+        "connection-mode",
         "wheel",
         "view-only",
         "clipboard-sync",
@@ -834,6 +870,32 @@ function tauriWebviewWindowClass() {
 }
 function isTauriShell() {
   return typeof tauriWebviewWindowClass() === "function";
+}
+async function setupTauriFileDrop() {
+  if (!isTauriShell() || !isMainSession) return;
+  const listen = globalThis.__TAURI__?.event?.listen;
+  if (typeof listen !== "function") return;
+  const setDropActive = (active) =>
+    document.body.classList.toggle("file-drop-active", active);
+  try {
+    await listen("tauri://drag-enter", () => setDropActive(true));
+    await listen("tauri://drag-over", () => setDropActive(true));
+    await listen("tauri://drag-leave", () => setDropActive(false));
+    await listen("tauri://drag-drop", (event) => {
+      setDropActive(false);
+      const paths = Array.isArray(event.payload?.paths)
+        ? event.payload.paths.filter((path) => typeof path === "string")
+        : [];
+      if (!paths.length) return;
+      debugClient("file-drop", { count: paths.length });
+      void sendDroppedFiles(paths);
+    });
+  } catch (error) {
+    debugClient("file-drop-unavailable", {
+      name: error?.name || "Error",
+      message: error?.message || String(error),
+    });
+  }
 }
 async function createTauriChildWindow(info, url, scaleFactor = 1) {
   const WebviewWindow = tauriWebviewWindowClass();
@@ -1181,12 +1243,14 @@ async function handleViewerPasteShortcut(event) {
     clipboardPasteShortcutInFlight = false;
   }
 }
-async function sendClipboardFiles(preloadedFiles) {
+async function sendFiles(loadFiles, uploadCommand, rememberClipboard) {
+  if (fileUploadInFlight) return;
+  fileUploadInFlight = true;
   const status = $("clipboard-files-status");
   try {
-    const files = preloadedFiles ?? (await tauriInvoke("read_clipboard_files"));
+    const files = await loadFiles();
     if (!Array.isArray(files) || files.length === 0) {
-      status.textContent = "本机剪贴板中没有文件。";
+      status.textContent = "没有检测到可用文件。";
       return;
     }
     const total = files.reduce((sum, file) => sum + Number(file.size || 0), 0);
@@ -1204,24 +1268,359 @@ async function sendClipboardFiles(preloadedFiles) {
       return;
     }
     status.textContent = `正在上传 ${files.length} 个文件（${formatFileSize(total)}），请稍候……`;
-    const result = await tauriInvoke("upload_clipboard_files", {
+    const result = await tauriInvoke(uploadCommand, {
       paths: files.map((file) => file.path),
     });
     const names = result.files?.map((file) => file.name).join("、") || summary;
     status.textContent = `已上传到远端 Downloads：${names}。请在 QQ 中手动粘贴。`;
-    remoteFilePasteSignature = clipboardFilesSignature(files);
+    if (rememberClipboard)
+      remoteFilePasteSignature = clipboardFilesSignature(files);
     toast("文件已上传并写入远端 Linux 文件剪贴板，请在 QQ 中按 Ctrl+V。 ");
   } catch (error) {
     reportClipboardFileError(error);
   } finally {
+    fileUploadInFlight = false;
     setInteractive();
   }
 }
+function sendClipboardFiles(preloadedFiles) {
+  return sendFiles(
+    () => preloadedFiles ?? tauriInvoke("read_clipboard_files"),
+    "upload_clipboard_files",
+    true,
+  );
+}
+function sendDroppedFiles(paths) {
+  if (!connected || settings.viewOnly || !isTauriShell() || !isMainSession) {
+    if (!connected) toast("请先连接后再拖放文件。");
+    return;
+  }
+  return sendFiles(
+    () => tauriInvoke("inspect_files", { paths }),
+    "upload_files",
+    false,
+  );
+}
+function waitForIceGathering(peer, timeoutMs = 5000) {
+  if (peer.iceGatheringState === "complete") return Promise.resolve();
+  return new Promise((resolve) => {
+    let timer;
+    const done = () => {
+      clearTimeout(timer);
+      peer.removeEventListener("icegatheringstatechange", onStateChange);
+      resolve();
+    };
+    const onStateChange = () => {
+      if (peer.iceGatheringState === "complete") done();
+    };
+    peer.addEventListener("icegatheringstatechange", onStateChange);
+    timer = setTimeout(done, timeoutMs);
+  });
+}
+async function stopVideoStream(reason = "", resumeRfb = true) {
+  videoEpoch++;
+  videoActive = false;
+  clearInterval(videoReceiverTimer);
+  videoReceiverTimer = undefined;
+  document.body.classList.remove("video-active");
+  if (resumeRfb) document.body.classList.remove("video-pending");
+  else document.body.classList.add("video-pending");
+  const peer = videoPeer;
+  videoPeer = undefined;
+  peer?.close();
+  const video = $("video-stream");
+  video.hidden = true;
+  video.srcObject = null;
+  if (rfb) rfb.videoMode = !resumeRfb;
+  if (reason && connected) $("connection-method").textContent = reason;
+  if (isTauriShell() && token) {
+    await api(`/api/video/${encodeURIComponent(sessionId)}`, {
+      method: "DELETE",
+    }).catch(() => {});
+  }
+}
+function summarizeVideoSdp(sdp) {
+  const lines = String(sdp || "").split(/\r?\n/);
+  const find = (prefix) =>
+    lines.find((line) => line.startsWith(prefix)) || null;
+  return {
+    media: find("m=video "),
+    direction:
+      find("a=sendrecv") ||
+      find("a=sendonly") ||
+      find("a=recvonly") ||
+      find("a=inactive"),
+    setup: find("a=setup:"),
+    mid: find("a=mid:"),
+    candidateCount: lines.filter((line) => line.startsWith("a=candidate:"))
+      .length,
+    codecs: lines
+      .filter((line) => line.startsWith("a=rtpmap:"))
+      .map((line) => line.replace(/^a=rtpmap:/, "")),
+  };
+}
+async function collectVideoStats(peer) {
+  try {
+    const report = await peer.getStats();
+    const stats = { inbound: [], transport: [], candidatePairs: [] };
+    report.forEach((stat) => {
+      if (
+        stat.type === "inbound-rtp" &&
+        (stat.kind || stat.mediaType) === "video"
+      ) {
+        stats.inbound.push({
+          packetsReceived: stat.packetsReceived || 0,
+          bytesReceived: stat.bytesReceived || 0,
+          framesReceived: stat.framesReceived || 0,
+          framesDecoded: stat.framesDecoded || 0,
+          keyFramesDecoded: stat.keyFramesDecoded || 0,
+        });
+      } else if (stat.type === "transport") {
+        stats.transport.push({
+          dtlsState: stat.dtlsState || null,
+          iceState: stat.iceState || null,
+          selectedCandidatePairId: stat.selectedCandidatePairId || null,
+        });
+      } else if (
+        stat.type === "candidate-pair" &&
+        (stat.nominated || stat.selected)
+      ) {
+        stats.candidatePairs.push({
+          state: stat.state || null,
+          nominated: stat.nominated === true,
+          bytesSent: stat.bytesSent || 0,
+          bytesReceived: stat.bytesReceived || 0,
+        });
+      }
+    });
+    return stats;
+  } catch {
+    return { inbound: [], transport: [], candidatePairs: [] };
+  }
+}
+async function failVideoStream(error, peerState = "unknown/unknown") {
+  const message = `视频流不可用：${error?.message || String(error)}（${peerState}）。未自动回退 VNC，请切换“标准 VNC”后重新连接。`;
+  debugClient("video-failure", { sessionId, message });
+  videoFailureMessage = message;
+  await stopVideoStream("视频流失败 · 未连接", false);
+  if (rfb) rfb.disconnect();
+}
+async function startVideoStream() {
+  if (
+    activeConnectionMode !== "video" ||
+    !isTauriShell() ||
+    !connected ||
+    videoPeer
+  )
+    return;
+  if (typeof RTCPeerConnection !== "function") {
+    await failVideoStream(new Error("当前 WebView 不支持 WebRTC"));
+    return;
+  }
+  const epoch = ++videoEpoch;
+  if (rfb) rfb.videoMode = true;
+  document.body.classList.add("video-pending");
+  debugClient("video-start", { sessionId, epoch });
+  const video = $("video-stream");
+  video.muted = true;
+  video.autoplay = true;
+  video.playsInline = true;
+  const peer = new RTCPeerConnection({ iceServers: [] });
+  let resolveFirstFrame;
+  const firstFrame = new Promise((resolve) => {
+    resolveFirstFrame = resolve;
+  });
+  const activateVideo = () => {
+    if (epoch !== videoEpoch || videoActive) return;
+    videoActive = true;
+    debugClient("video-first-frame", {
+      sessionId,
+      width: video.videoWidth,
+      height: video.videoHeight,
+      readyState: video.readyState,
+    });
+    video.hidden = false;
+    document.body.classList.remove("video-pending");
+    document.body.classList.add("video-active");
+    rfb.videoMode = true;
+    geometry(false);
+    $("connection-method").textContent = "WebRTC/VP8 视频 · RFB 输入";
+    resolveFirstFrame();
+  };
+  videoPeer = peer;
+  video.hidden = false;
+  peer.addTransceiver("video", { direction: "recvonly" });
+  let mediaAttached = false;
+  const attachVideoStream = (stream, source) => {
+    if (
+      mediaAttached ||
+      epoch !== videoEpoch ||
+      !stream ||
+      typeof stream.getVideoTracks !== "function" ||
+      stream.getVideoTracks().length === 0
+    )
+      return;
+    mediaAttached = true;
+    debugClient("video-track", {
+      sessionId,
+      source,
+      streams: 1,
+      track: stream.getVideoTracks()[0]?.kind || null,
+    });
+    const markFirstFrame = () => activateVideo();
+    let playStarted = false;
+    const play = () => {
+      if (playStarted || epoch !== videoEpoch || video.srcObject !== stream)
+        return;
+      playStarted = true;
+      void video
+        .play()
+        .then(() => {
+          if (typeof video.requestVideoFrameCallback === "function")
+            video.requestVideoFrameCallback(markFirstFrame);
+          else setTimeout(markFirstFrame, 100);
+        })
+        .catch((error) => {
+          const cleanupAbort =
+            error?.name === "AbortError" &&
+            (epoch !== videoEpoch || video.srcObject !== stream);
+          if (!cleanupAbort)
+            debugClient("video-play-error", {
+              sessionId,
+              name: error?.name || "Error",
+              message: error?.message || String(error),
+            });
+          if (error?.name === "AbortError" && !cleanupAbort) {
+            playStarted = false;
+            setTimeout(play, 250);
+          }
+        });
+    };
+    video.addEventListener("loadeddata", markFirstFrame, { once: true });
+    video.addEventListener("playing", markFirstFrame, { once: true });
+    video.addEventListener("loadedmetadata", play, { once: true });
+    video.srcObject = null;
+    video.srcObject = stream;
+    play();
+  };
+  peer.addEventListener("track", (event) => {
+    if (epoch !== videoEpoch) return;
+    attachVideoStream(
+      event.streams?.[0] || new MediaStream([event.track]),
+      "track",
+    );
+  });
+  peer.addEventListener("addstream", (event) => {
+    if (epoch !== videoEpoch) return;
+    attachVideoStream(event.stream, "addstream");
+  });
+  const logPeerState = (event) => {
+    if (videoPeer !== peer) return;
+    debugClient("video-connection-state", {
+      sessionId,
+      event,
+      state: peer.connectionState,
+      ice: peer.iceConnectionState,
+      gathering: peer.iceGatheringState,
+      signaling: peer.signalingState,
+    });
+  };
+  peer.addEventListener("connectionstatechange", () => {
+    logPeerState("connection");
+    if (peer.connectionState === "failed")
+      void failVideoStream(
+        new Error("WebRTC 连接失败"),
+        `${peer.connectionState}/${peer.iceConnectionState}`,
+      );
+    else if (peer.connectionState === "disconnected")
+      setTimeout(() => {
+        if (
+          videoPeer === peer &&
+          ["failed", "disconnected"].includes(peer.connectionState)
+        )
+          void failVideoStream(
+            new Error("WebRTC 连接断开"),
+            `${peer.connectionState}/${peer.iceConnectionState}`,
+          );
+      }, 1500);
+  });
+  peer.addEventListener("iceconnectionstatechange", () => logPeerState("ice"));
+  peer.addEventListener("signalingstatechange", () =>
+    logPeerState("signaling"),
+  );
+  try {
+    const offer = await peer.createOffer();
+    await peer.setLocalDescription(offer);
+    await waitForIceGathering(peer);
+    if (epoch !== videoEpoch || !peer.localDescription?.sdp) return;
+    const response = await api(
+      `/api/video/${encodeURIComponent(sessionId)}/offer`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type: peer.localDescription.type,
+          sdp: peer.localDescription.sdp,
+        }),
+      },
+    );
+    if (!response.ok)
+      throw new Error((await response.text()) || "视频流启动失败");
+    const result = await response.json();
+    debugClient("video-answer", {
+      sessionId,
+      codec: result.codec || "unknown",
+      sdpLength: result.answer?.sdp?.length || 0,
+      hasVideo: /(^|\n)m=video /m.test(result.answer?.sdp || ""),
+      local: summarizeVideoSdp(peer.localDescription?.sdp),
+      remote: summarizeVideoSdp(result.answer?.sdp),
+    });
+    await peer.setRemoteDescription(result.answer);
+    videoReceiverTimer = setInterval(() => {
+      if (epoch !== videoEpoch || mediaAttached || videoPeer !== peer) {
+        clearInterval(videoReceiverTimer);
+        videoReceiverTimer = undefined;
+        return;
+      }
+      const tracks = (peer.getReceivers?.() || [])
+        .map((receiver) => receiver.track)
+        .filter(
+          (track) => track?.kind === "video" && track.readyState === "live",
+        );
+      if (tracks.length) attachVideoStream(new MediaStream(tracks), "receiver");
+    }, 100);
+    await Promise.race([
+      firstFrame,
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("视频首帧超时")), 10000),
+      ),
+    ]);
+    if (epoch !== videoEpoch) return;
+    $("video-status").textContent =
+      `WebRTC / ${result.codec || "VP8"} · ${result.portMin}-${result.portMax} UDP`;
+  } catch (error) {
+    if (epoch !== videoEpoch) return;
+    debugClient("video-error", {
+      sessionId,
+      name: error?.name || "Error",
+      message: error?.message || String(error),
+    });
+    const peerState = `${peer.connectionState || "unknown"}/${peer.iceConnectionState || "unknown"}`;
+    debugClient("video-stats", {
+      sessionId,
+      peerState,
+      inbound: await collectVideoStats(peer),
+    });
+    await failVideoStream(error, peerState);
+  }
+}
 function setInteractive() {
+  $("connection-mode").disabled =
+    connected || !isMainSession || !isTauriShell();
   $("disconnect").disabled = !connected && !connectionWanted;
   $("send-clipboard").disabled = !connected || settings.viewOnly;
   $("send-clipboard-files").disabled =
-    !connected || settings.viewOnly || !isTauriShell();
+    !connected || settings.viewOnly || !isTauriShell() || fileUploadInFlight;
   if (rfb) rfb.viewOnly = settings.viewOnly;
 }
 
@@ -1248,6 +1647,15 @@ async function connect(prepare = true) {
   const attempt = ++connectEpoch;
   $("connect").disabled = true;
   state("正在连接", "connecting");
+  activeConnectionMode = settings.connectionMode;
+  videoFailureMessage = undefined;
+  $("connection-method").textContent =
+    activeConnectionMode === "video" ? "视频模式 · 协商中" : "标准 VNC";
+  $("video-status").textContent =
+    activeConnectionMode === "video"
+      ? "视频模式正在等待首帧，RFB 仅负责控制。"
+      : "本次连接使用标准 VNC。";
+  $("connection-mode").disabled = true;
   try {
     if (setupAvailable && prepare) {
       connectionWanted = true;
@@ -1300,6 +1708,12 @@ async function connect(prepare = true) {
       connected = true;
       debugClient("vnc-connect", { sessionId, child: !isMainSession });
       state("已连接", "connected");
+      $("connection-method").textContent =
+        activeConnectionMode === "video" ? "视频模式 · 等待首帧" : "标准 VNC";
+      if (activeConnectionMode === "video") {
+        rfb.videoMode = true;
+        document.body.classList.add("video-pending");
+      }
       if (isMainSession) {
         imeOverlay = new ImeOverlay({
           screen: $("screen"),
@@ -1323,6 +1737,7 @@ async function connect(prepare = true) {
       startChildMonitor();
       if ($("settings").hidden) client.focus();
       requestRemoteWindowActivation();
+      if (activeConnectionMode === "video") void startVideoStream();
     });
     client.addEventListener("disconnect", (event) => {
       debugClient("vnc-disconnect", {
@@ -1331,6 +1746,12 @@ async function connect(prepare = true) {
         child: !isMainSession,
       });
       connected = false;
+      activeConnectionMode = settings.connectionMode;
+      const failure = videoFailureMessage;
+      videoFailureMessage = undefined;
+      const skipVideoStop = manualDisconnectPending;
+      manualDisconnectPending = false;
+      if (!skipVideoStop) void stopVideoStream();
       remoteFilePasteSignature = undefined;
       if (isMainSession) void cleanupOpenedChildSessions();
       else if (!event.detail.clean) startChildRecoveryMonitor();
@@ -1358,6 +1779,12 @@ async function connect(prepare = true) {
       $("welcome").hidden = false;
       $("connect").disabled = false;
       state("已断开", "disconnected");
+      $("connection-method").textContent = failure
+        ? "视频流失败 · 未连接"
+        : "未连接";
+      $("connection-mode-settings").textContent =
+        connectionModeLabels[settings.connectionMode];
+      $("video-status").textContent = failure || "连接方式可在主页选择。";
       $("geometry").textContent = "原始像素 · 等比例缩放";
       setInteractive();
       if (!event.detail.clean)
@@ -1378,7 +1805,10 @@ async function connect(prepare = true) {
     });
   } catch (error) {
     state("未连接", "disconnected");
+    $("connection-method").textContent = "未连接";
+    $("video-status").textContent = "连接方式可在主页选择。";
     $("connect").disabled = false;
+    setInteractive();
     toast(error.message || "无法建立连接");
   } finally {
     connecting = false;
@@ -1477,13 +1907,17 @@ async function cleanupOpenedChildSessions() {
   }
 }
 async function stopMainConnection() {
-  await flushSettings();
+  const client = rfb;
+  manualDisconnectPending = Boolean(client);
+  void stopVideoStream();
   connectEpoch++;
   stopChildRecoveryMonitor();
   $("connect").disabled = false;
   connectionWanted = false;
   recoveryEpoch++;
   clearTimeout(recoveryTimer);
+  client?.disconnect();
+  await flushSettings();
   const childrenCleanup = isMainSession
     ? cleanupOpenedChildSessions()
     : Promise.resolve(
@@ -1491,7 +1925,6 @@ async function stopMainConnection() {
           method: "DELETE",
         }).catch(() => {}),
       );
-  rfb?.disconnect();
   await childrenCleanup;
   if (setupAvailable) await api("/api/main/stop", { method: "POST" });
   setInteractive();
@@ -1506,7 +1939,7 @@ async function openSetup() {
 }
 $("setup-open").addEventListener("click", openSetup);
 $("setup-edit").addEventListener("click", openSetup);
-$("connect").addEventListener("click", () => connect());
+$("connect").addEventListener("click", () => void connect());
 $("bitrate").value = settings.bitrate;
 $("bitrate-value").textContent = bitrateLabels[settings.bitrate];
 $("bitrate").addEventListener("change", () => setBitrate($("bitrate").value));
@@ -1515,6 +1948,12 @@ $("frame-rate-value").textContent = frameRateLabels[settings.frameRate];
 $("frame-rate").addEventListener("change", () =>
   setFrameRate($("frame-rate").value),
 );
+$("connection-mode").addEventListener("change", () => {
+  if (connected || !isMainSession) return;
+  settings.connectionMode =
+    $("connection-mode").value === "video" ? "video" : "vnc";
+  save();
+});
 $("disconnect").addEventListener("click", () =>
   stopMainConnection().catch(() => toast("会话清理失败，请检查 SSH。")),
 );
@@ -1707,5 +2146,20 @@ window.addEventListener("pagehide", () => {
     ).catch(() => {});
   }
 });
+document.addEventListener(
+  "dragover",
+  (event) => {
+    if (isTauriShell()) event.preventDefault();
+  },
+  true,
+);
+document.addEventListener(
+  "drop",
+  (event) => {
+    if (isTauriShell()) event.preventDefault();
+  },
+  true,
+);
+void setupTauriFileDrop();
 sessionReady = loadSessionInfo();
 scale(settings.scale, false);
