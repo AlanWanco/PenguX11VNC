@@ -19,6 +19,7 @@ function installTauriFixture(permissions) {
     dragCalls: 0,
     invokeCalls: [],
     createdUrls: [],
+    eventListeners: new Map(),
   };
   class WebviewWindow {
     constructor(label, options = {}) {
@@ -96,12 +97,36 @@ function installTauriFixture(permissions) {
     },
     async close() {},
   };
+  const event = {
+    async listen(name, callback) {
+      const listeners = fixture.eventListeners.get(name) || new Set();
+      listeners.add(callback);
+      fixture.eventListeners.set(name, listeners);
+      return () => listeners.delete(callback);
+    },
+  };
+  fixture.emitEvent = async (name, payload) => {
+    for (const callback of fixture.eventListeners.get(name) || [])
+      await callback({ payload });
+  };
   window.__TAURI__ = {
     core: {
       async invoke(command, args) {
         fixture.invokeCalls.push({ command, args });
+        if (command === "read_clipboard_files")
+          throw new Error("本机剪贴板中没有可用文件");
+        if (command === "inspect_files")
+          return [{ path: args.paths[0], name: "drop.txt", size: 5 }];
+        if (command === "upload_files")
+          return {
+            files: [
+              { name: "drop.txt", path: "/home/test/Downloads/drop.txt" },
+            ],
+          };
+        return undefined;
       },
     },
+    event,
     webviewWindow: { WebviewWindow },
     window: {
       LogicalSize,
@@ -111,7 +136,7 @@ function installTauriFixture(permissions) {
   window.tauriFixture = fixture;
 }
 
-export async function testTauriChildren(browser, app) {
+export async function testTauriChildren(browser, app, mock) {
   const capability = JSON.parse(
     await readFile(
       new URL("../src-tauri/capabilities/default.json", import.meta.url),
@@ -151,7 +176,7 @@ export async function testTauriChildren(browser, app) {
     return route.fulfill({ json: body });
   });
   await page.route("**/api/sessions/**", (route) => {
-    assert.equal(route.request().method(), "DELETE");
+    if (route.request().method() !== "DELETE") return route.continue();
     const id = new URL(route.request().url()).pathname.split("/").at(-1);
     deleted.push(id);
     visible = visible.filter((info) => `window-${info.id.slice(2)}` !== id);
@@ -191,6 +216,85 @@ export async function testTauriChildren(browser, app) {
       /隐藏到(菜单栏|系统托盘)/,
       "Main-window close must explain the native tray behavior",
     );
+    await page.waitForFunction(
+      () =>
+        window.tauriFixture.eventListeners.has(
+          "pengux11vnc://native-shortcut",
+        ) && window.tauriFixture.eventListeners.has("tauri://drag-drop"),
+    );
+    await page.click("#settings-toggle");
+    if (await page.locator("#view-only").isChecked())
+      await page.uncheck("#view-only");
+    await page.click("#settings-close");
+    const beforeNativeCopy = mock.events.keys.length;
+    await page.evaluate(() =>
+      window.tauriFixture.emitEvent("pengux11vnc://native-shortcut", {
+        key: "c",
+      }),
+    );
+    await page.waitForTimeout(80);
+    const nativeCopyKeys = mock.events.keys.slice(beforeNativeCopy);
+    assert.deepEqual(
+      nativeCopyKeys.slice(-4).map(({ down, sym }) => [down, sym]),
+      [
+        [1, 0xffe3],
+        [1, 0x63],
+        [0, 0x63],
+        [0, 0xffe3],
+      ],
+      "macOS native Copy must become remote Ctrl+C",
+    );
+    const beforeNativePaste = mock.events.keys.length;
+    await page.evaluate(() =>
+      window.tauriFixture.emitEvent("pengux11vnc://native-shortcut", {
+        key: "v",
+      }),
+    );
+    await page.waitForTimeout(80);
+    const nativePasteKeys = mock.events.keys.slice(beforeNativePaste);
+    assert.deepEqual(
+      nativePasteKeys.slice(-4).map(({ down, sym }) => [down, sym]),
+      [
+        [1, 0xffe3],
+        [1, 0x76],
+        [0, 0x76],
+        [0, 0xffe3],
+      ],
+      "macOS native Paste must become remote Ctrl+V when no file is present",
+    );
+    const beforePasswordShortcut = mock.events.keys.length;
+    await page.evaluate(async () => {
+      const dialog = document.querySelector("#password-dialog");
+      dialog.showModal();
+      document.querySelector("#password").focus();
+      await window.tauriFixture.emitEvent("pengux11vnc://native-shortcut", {
+        key: "v",
+      });
+      dialog.close();
+    });
+    await page.waitForTimeout(80);
+    assert.equal(
+      mock.events.keys.length,
+      beforePasswordShortcut,
+      "password entry must keep Cmd+V local and must not send remote Ctrl+V",
+    );
+    page.once("dialog", (dialog) => dialog.accept());
+    await page.evaluate(() =>
+      window.tauriFixture.emitEvent("tauri://drag-drop", {
+        paths: ["/tmp/drop.txt"],
+      }),
+    );
+    await page.waitForFunction(() =>
+      window.tauriFixture.invokeCalls.some(
+        (call) => call.command === "upload_files",
+      ),
+    );
+    const uploadCall = await page.evaluate(() =>
+      window.tauriFixture.invokeCalls.find(
+        (call) => call.command === "upload_files",
+      ),
+    );
+    assert.deepEqual(uploadCall.args.paths, ["/tmp/drop.txt"]);
     await page.click("#settings-toggle");
     assert.match(
       await page.locator("#tauri-close-hint").textContent(),

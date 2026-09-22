@@ -242,7 +242,7 @@ try {
     "Reconnect duplicated canvas",
   );
   assert.deepEqual(errors, []);
-  await testTauriChildren(browser, app);
+  await testTauriChildren(browser, app, mock);
   console.log(
     "PASS: lossless negotiation, frame rate, 3 aspect ratios, scaled pointer/IME overlay, F11/brackets, 25% wheel, view-only, reconnect, Unicode guard",
   );

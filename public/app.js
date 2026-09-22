@@ -871,6 +871,134 @@ function tauriWebviewWindowClass() {
 function isTauriShell() {
   return typeof tauriWebviewWindowClass() === "function";
 }
+const isMacPlatform = /Mac|iPhone|iPad/.test(
+  `${navigator.platform || ""} ${navigator.userAgent || ""}`,
+);
+let macRemoteShortcutsEnabled = false;
+let macRemoteShortcutRequest = 0;
+async function setMacRemoteShortcuts(enabled) {
+  if (!isMacPlatform || !isTauriShell()) return;
+  if (macRemoteShortcutsEnabled === enabled) return;
+  const request = ++macRemoteShortcutRequest;
+  try {
+    await tauriInvoke("set_macos_remote_shortcuts", { enabled });
+    if (request === macRemoteShortcutRequest)
+      macRemoteShortcutsEnabled = enabled;
+  } catch (error) {
+    debugClient("macos-shortcut-menu-unavailable", {
+      name: error?.name || "Error",
+      message: error?.message || String(error),
+    });
+  }
+}
+function updateMacRemoteShortcuts() {
+  const target = document.activeElement;
+  const onScreen = target instanceof Element && !!target.closest("#screen");
+  void setMacRemoteShortcuts(onScreen && connected && !settings.viewOnly);
+}
+function isPasswordInput(target) {
+  return target instanceof HTMLInputElement && target.type === "password";
+}
+function activeEditableElement() {
+  const target = document.activeElement;
+  if (
+    target instanceof HTMLInputElement ||
+    target instanceof HTMLTextAreaElement ||
+    target?.isContentEditable
+  )
+    return target;
+  return undefined;
+}
+function insertTextIntoEditable(target, text) {
+  if (
+    target instanceof HTMLInputElement ||
+    target instanceof HTMLTextAreaElement
+  ) {
+    const start = target.selectionStart ?? target.value.length;
+    const end = target.selectionEnd ?? start;
+    target.setRangeText(text, start, end, "end");
+    target.dispatchEvent(new Event("input", { bubbles: true }));
+    return true;
+  }
+  if (target?.isContentEditable) {
+    return document.execCommand("insertText", false, text);
+  }
+  return false;
+}
+async function handleNativeEditableShortcut(key, target) {
+  if (key === "v") {
+    try {
+      const text = await navigator.clipboard?.readText?.();
+      if (typeof text === "string") insertTextIntoEditable(target, text);
+    } catch {
+      toast("无法读取本机文字剪贴板。");
+    }
+    return;
+  }
+  if (key === "c" || key === "x") {
+    if (document.execCommand(key === "c" ? "copy" : "cut")) return;
+    const selection = target?.value?.slice(
+      target.selectionStart ?? 0,
+      target.selectionEnd ?? 0,
+    );
+    if (selection && navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(selection).catch(() => {});
+      if (key === "x") {
+        const start = target.selectionStart ?? 0;
+        const end = target.selectionEnd ?? start;
+        target.setRangeText("", start, end, "start");
+        target.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+    }
+  }
+}
+function nativeViewerPasteEvent() {
+  const canvas = $("screen").querySelector("canvas");
+  return {
+    key: "v",
+    code: "KeyV",
+    location: 0,
+    ctrlKey: false,
+    altKey: false,
+    shiftKey: false,
+    metaKey: true,
+    repeat: false,
+    nativeShortcut: true,
+    target: canvas,
+    preventDefault() {},
+    stopPropagation() {},
+  };
+}
+async function setupTauriNativeShortcuts() {
+  if (!isTauriShell()) return;
+  const listen = globalThis.__TAURI__?.event?.listen;
+  if (typeof listen !== "function") return;
+  try {
+    await listen("pengux11vnc://native-shortcut", (event) => {
+      const key = String(event.payload?.key || "").toLowerCase();
+      if (!(key === "c" || key === "v" || key === "x")) return;
+      const target = activeEditableElement();
+      if (target) {
+        // Password entry is always local. Never send a converted Ctrl shortcut
+        // to the remote framebuffer while the VNC password dialog has focus.
+        if (isPasswordInput(target)) {
+          void handleNativeEditableShortcut(key, target);
+          return;
+        }
+        void handleNativeEditableShortcut(key, target);
+        return;
+      }
+      if (!connected || settings.viewOnly) return;
+      if (key === "v") void handleViewerPasteShortcut(nativeViewerPasteEvent());
+      else rfb?.sendCtrlShortcut?.(key);
+    });
+  } catch (error) {
+    debugClient("native-shortcut-unavailable", {
+      name: error?.name || "Error",
+      message: error?.message || String(error),
+    });
+  }
+}
 async function setupTauriFileDrop() {
   if (!isTauriShell() || !isMainSession) return;
   const listen = globalThis.__TAURI__?.event?.listen;
@@ -1190,6 +1318,10 @@ function isViewerPasteShortcut(event) {
   return true;
 }
 function replayClipboardPasteShortcut(event) {
+  if (event.nativeShortcut) {
+    rfb?.sendCtrlShortcut?.("v");
+    return;
+  }
   const canvas = $("screen").querySelector("canvas");
   if (!canvas) return;
   replayingClipboardPasteShortcut = true;
@@ -1695,8 +1827,11 @@ async function connect(prepare = true) {
     client.bitrateMode = settings.bitrate;
     client.frameRate = settings.frameRate;
     client.addEventListener("credentialsrequired", () => {
-      $("password-dialog").showModal();
-      $("password").focus();
+      void setMacRemoteShortcuts(false).finally(() => {
+        if (client !== rfb) return;
+        $("password-dialog").showModal();
+        $("password").focus();
+      });
     });
     client.addEventListener("securityfailure", () => {
       void clearVncPasswordCache();
@@ -1736,6 +1871,7 @@ async function connect(prepare = true) {
       geometry(true);
       startChildMonitor();
       if ($("settings").hidden) client.focus();
+      updateMacRemoteShortcuts();
       requestRemoteWindowActivation();
       if (activeConnectionMode === "video") void startVideoStream();
     });
@@ -1746,6 +1882,7 @@ async function connect(prepare = true) {
         child: !isMainSession,
       });
       connected = false;
+      void setMacRemoteShortcuts(false);
       activeConnectionMode = settings.connectionMode;
       const failure = videoFailureMessage;
       videoFailureMessage = undefined;
@@ -2028,6 +2165,7 @@ $("view-only").addEventListener("change", () => {
   settings.viewOnly = $("view-only").checked;
   rfb?.wheelLimiter?.reset();
   setInteractive();
+  updateMacRemoteShortcuts();
   save();
 });
 $("settings-toggle").addEventListener("click", () =>
@@ -2038,10 +2176,18 @@ window.addEventListener("focus", requestRemoteWindowActivation);
 document.addEventListener(
   "pointerdown",
   (event) => {
-    if (event.target.closest("#screen")) requestRemoteWindowActivation();
+    const onScreen =
+      event.target instanceof Element && !!event.target.closest("#screen");
+    if (onScreen) requestRemoteWindowActivation();
+    void setMacRemoteShortcuts(onScreen && connected && !settings.viewOnly);
   },
   true,
 );
+document.addEventListener("focusin", (event) => {
+  const onScreen =
+    event.target instanceof Element && !!event.target.closest("#screen");
+  void setMacRemoteShortcuts(onScreen && connected && !settings.viewOnly);
+});
 document.addEventListener("pointerdown", (event) => {
   const settingsPanel = $("settings");
   if (
@@ -2105,6 +2251,7 @@ function cancelPassword() {
 }
 $("password-cancel").addEventListener("click", cancelPassword);
 $("password-dialog").addEventListener("cancel", cancelPassword);
+$("password-dialog").addEventListener("close", updateMacRemoteShortcuts);
 document.addEventListener("keydown", handleViewerPasteShortcut, true);
 $("send-clipboard-files").addEventListener("click", () => {
   if (!connected || settings.viewOnly || !isTauriShell()) return;
@@ -2160,6 +2307,7 @@ document.addEventListener(
   },
   true,
 );
+void setupTauriNativeShortcuts();
 void setupTauriFileDrop();
 sessionReady = loadSessionInfo();
 scale(settings.scale, false);

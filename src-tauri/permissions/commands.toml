@@ -6,6 +6,11 @@ description = "允许主窗口设置和清除 VNC 内容比例约束。"
 commands.allow = ["set_main_window_aspect"]
 
 [[permission]]
+identifier = "allow-set-macos-remote-shortcuts"
+description = "允许仅在远端画布聚焦时切换 macOS 远端快捷键菜单。"
+commands.allow = ["set_macos_remote_shortcuts"]
+
+[[permission]]
 identifier = "allow-read-clipboard-files"
 description = "允许读取用户主动选择的本机文件剪贴板预览。"
 commands.allow = ["read_clipboard_files"]

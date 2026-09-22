@@ -22,6 +22,8 @@ use std::sync::{
 };
 use std::thread;
 use std::time::Duration;
+#[cfg(target_os = "macos")]
+use tauri::Emitter;
 use tauri::{
     AppHandle, Manager, PhysicalSize, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
@@ -39,6 +41,94 @@ struct MainWindowAspect {
     ratio: Mutex<Option<f64>>,
     last_size: Mutex<Option<PhysicalSize<u32>>>,
     correcting: AtomicBool,
+}
+
+#[cfg(target_os = "macos")]
+struct MacShortcutMenus {
+    native: tauri::menu::Menu<tauri::Wry>,
+    remote: tauri::menu::Menu<tauri::Wry>,
+}
+
+#[cfg(target_os = "macos")]
+fn install_macos_remote_menu(
+    app: &AppHandle,
+) -> Result<MacShortcutMenus, Box<dyn std::error::Error>> {
+    use tauri::menu::{Menu, MenuItemBuilder, PredefinedMenuItem, Submenu};
+
+    let native = Menu::default(app)?;
+    let remote = Menu::default(app)?;
+    let items = remote.items()?;
+    let Some((edit_index, edit_item)) = items.iter().enumerate().find(|(_, item)| {
+        item.as_submenu()
+            .and_then(|submenu| submenu.text().ok())
+            .as_deref()
+            == Some("Edit")
+    }) else {
+        return Err("macOS 默认菜单中缺少 Edit 子菜单".into());
+    };
+    remote.remove(edit_item)?;
+
+    let copy = MenuItemBuilder::with_id("pengux-native-copy", "复制到远端")
+        .accelerator("CmdOrCtrl+KeyC")
+        .build(app)?;
+    let cut = MenuItemBuilder::with_id("pengux-native-cut", "剪切到远端")
+        .accelerator("CmdOrCtrl+KeyX")
+        .build(app)?;
+    let paste = MenuItemBuilder::with_id("pengux-native-paste", "粘贴到远端")
+        .accelerator("CmdOrCtrl+KeyV")
+        .build(app)?;
+    let edit = Submenu::with_id_and_items(
+        app,
+        "pengux11vnc-edit",
+        "Edit",
+        true,
+        &[
+            &PredefinedMenuItem::undo(app, None)?,
+            &PredefinedMenuItem::redo(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &copy,
+            &cut,
+            &paste,
+            &PredefinedMenuItem::select_all(app, None)?,
+        ],
+    )?;
+    remote.insert(&edit, edit_index)?;
+    app.set_menu(native.clone())?;
+    Ok(MacShortcutMenus { native, remote })
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn set_macos_remote_shortcuts(app: AppHandle, enabled: bool) -> Result<(), String> {
+    let menus = app
+        .try_state::<MacShortcutMenus>()
+        .ok_or_else(|| "macOS 菜单尚未初始化".to_string())?;
+    let menu = if enabled {
+        menus.remote.clone()
+    } else {
+        menus.native.clone()
+    };
+    app.set_menu(menu)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+fn set_macos_remote_shortcuts(_app: AppHandle, _enabled: bool) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn emit_macos_remote_shortcut(app: &AppHandle, key: &str) {
+    let Some(window) = app
+        .webview_windows()
+        .into_values()
+        .find(|window| window.is_focused().unwrap_or(false))
+    else {
+        return;
+    };
+    let _ = window.emit("pengux11vnc://native-shortcut", json!({ "key": key }));
 }
 
 #[derive(serde::Serialize)]
@@ -752,12 +842,16 @@ pub fn run() {
         .manage(MainWindowAspect::default())
         .invoke_handler(tauri::generate_handler![
             set_main_window_aspect,
+            set_macos_remote_shortcuts,
             read_clipboard_files,
             inspect_files,
             upload_clipboard_files,
             upload_files
         ])
         .setup(|app| {
+            #[cfg(target_os = "macos")]
+            app.manage(install_macos_remote_menu(app.handle())?);
+
             let root = bridge_root(app.handle())?;
             let runtime = app
                 .path()
@@ -809,6 +903,17 @@ pub fn run() {
                 eprintln!("系统托盘不可用：主窗口将使用正常关闭行为");
             }
             Ok(())
+        })
+        .on_menu_event(|app, event| {
+            #[cfg(target_os = "macos")]
+            match event.id().as_ref() {
+                "pengux-native-copy" => emit_macos_remote_shortcut(app, "c"),
+                "pengux-native-cut" => emit_macos_remote_shortcut(app, "x"),
+                "pengux-native-paste" => emit_macos_remote_shortcut(app, "v"),
+                _ => {}
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = (app, event);
         })
         .on_window_event(|window, event| {
             if window.label() == "main" {

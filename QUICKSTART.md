@@ -35,7 +35,7 @@ npm ci
 
 ### 发送剪贴板文件
 
-在 Tauri 设置中点击「上传剪贴板文件到远端 Downloads」后，应用读取本机文件剪贴板并显示确认信息。单次文件合计上限 50 MiB，仅传送普通文件，不递归传送文件夹。确认后按现有 SSH 私钥配置执行 SCP：文件进入远端 `xdg-user-dir DOWNLOAD` 指向的目录（通常是 `~/Downloads`），并将远端路径写入 Linux `text/uri-list` 剪贴板。回到 QQ 窗口手动按 `Ctrl+V`，不会自动发送消息。
+在 Tauri 设置中点击「上传剪贴板文件到远端 Downloads」后，应用读取本机文件剪贴板并显示确认信息。单次文件合计上限 50 MiB，仅传送普通文件，不递归传送文件夹。确认后按现有 SSH 私钥配置执行 SCP：文件进入远端 `xdg-user-dir DOWNLOAD` 指向的目录（通常是 `~/Downloads`），并将远端路径写入 Linux `text/uri-list` 剪贴板。回到 QQ 窗口手动按 `Ctrl+V`（macOS 使用 `Cmd+V`），不会自动发送消息。
 
 远端针对 X11/XWayland QQ 先尝试 `xclip` 写入 `text/uri-list`，若 `python3` 可用还会启动内置 X11 剪贴板 owner，补充 GNOME/KDE 的多 MIME 文件格式；`xclip` 不可用时再尝试 `wl-copy`，最后使用该 Python/X11 写入器。若 QQ/桌面未接受文件剪贴板格式，界面会报告失败或仍需使用远端文件管理器。Chrome 回退入口不读取本机文件剪贴板。
 
@@ -128,7 +128,7 @@ chmod 600 ~/.config/pengux11vnc/connections.json
 
 当前实验只启用 VP8/60 FPS，并通过 SSH 传递信令；视频进程随会话启动和退出，不是远端常驻服务。
 
-Tauri 主窗口支持拖放文件：连接后将一个或多个普通文件拖到窗口，松开并确认后会通过现有 SSH/SCP 流程上传到远端 Downloads，再在 QQ 中手动按 `Ctrl+V`。目录、重复文件和单次合计超过 50 MiB 的内容会被拒绝。
+Tauri 主窗口支持拖放文件：连接后将一个或多个普通文件拖到窗口，松开并确认后会通过现有 SSH/SCP 流程上传到远端 Downloads，再在 QQ 中手动按 `Ctrl+V`（macOS 使用 `Cmd+V`）。目录、重复文件和单次合计超过 50 MiB 的内容会被拒绝。
 
 密码文件权限必须是 `600`。JSON 不支持注释；需要说明时另写文档，不要把密码写进 JSON。
 

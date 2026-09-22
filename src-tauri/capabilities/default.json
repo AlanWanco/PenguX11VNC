@@ -15,6 +15,7 @@
     "core:window:allow-set-decorations",
     "core:window:allow-start-dragging",
     "allow-set-main-window-aspect",
+    "allow-set-macos-remote-shortcuts",
     "allow-read-clipboard-files",
     "allow-upload-clipboard-files",
     "allow-inspect-files",

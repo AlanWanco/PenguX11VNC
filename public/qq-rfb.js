@@ -6,7 +6,17 @@ import RFB from "/vendor/core/rfb.js";
 import { clientToElement } from "/vendor/core/util/element.js";
 import { releaseCapture } from "/vendor/core/util/events.js";
 import { encodings as e } from "/vendor/core/encodings.js";
+import KeyTable from "/vendor/core/input/keysym.js";
 import { WheelLimiter } from "./wheel.js";
+
+const isMacPlatform = /Mac|iPhone|iPad/.test(
+  `${navigator.platform || ""} ${navigator.userAgent || ""}`,
+);
+const controlShortcutKeys = {
+  c: { keysym: 0x63, code: "KeyC" },
+  v: { keysym: 0x76, code: "KeyV" },
+  x: { keysym: 0x78, code: "KeyX" },
+};
 
 export default class QQRFB extends RFB {
   constructor(...args) {
@@ -20,6 +30,30 @@ export default class QQRFB extends RFB {
 
   get videoMode() {
     return this._videoMode;
+  }
+
+  // WKWebView and browsers expose macOS Command as Meta. noVNC intentionally
+  // maps that key to Alt for generic remote desktops, but the remote target is
+  // Linux and its normal copy/paste shortcuts are Ctrl+C/Ctrl+V. Translate the
+  // modifier at the RFB boundary so both native menu shortcuts and ordinary
+  // key events behave like a Linux keyboard.
+  _handleKeyEvent(keysym, code, down, numlock, capslock) {
+    if (isMacPlatform && (code === "MetaLeft" || code === "MetaRight")) {
+      const right = code === "MetaRight";
+      keysym = right ? KeyTable.XK_Control_R : KeyTable.XK_Control_L;
+      code = right ? "ControlRight" : "ControlLeft";
+    }
+    super._handleKeyEvent(keysym, code, down, numlock, capslock);
+  }
+
+  sendCtrlShortcut(key) {
+    if (this._rfbConnectionState !== "connected" || this._viewOnly) return;
+    const shortcut = controlShortcutKeys[String(key).toLowerCase()];
+    if (!shortcut) return;
+    this.sendKey(KeyTable.XK_Control_L, "ControlLeft", true);
+    this.sendKey(shortcut.keysym, shortcut.code, true);
+    this.sendKey(shortcut.keysym, shortcut.code, false);
+    this.sendKey(KeyTable.XK_Control_L, "ControlLeft", false);
   }
 
   set videoMode(value) {
