@@ -123,6 +123,20 @@ export async function testTauriChildren(browser, app) {
   const errors = [];
   const deleted = [];
   let visible = [];
+  const readViewerSettings = () =>
+    fetch(`${app.origin}/api/settings?session=main`, {
+      headers: { "X-PenguX11VNC-Token": app.token },
+    }).then((response) => response.json());
+  const waitForSavedScale = async () => {
+    const deadline = Date.now() + 2000;
+    let data;
+    do {
+      data = await readViewerSettings();
+      if (Number.isFinite(data.settings?.vncScale)) return data;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    } while (Date.now() < deadline);
+    return data;
+  };
   page.on("pageerror", (error) => errors.push(error.message));
   await page.addInitScript(installTauriFixture, capability.permissions);
   await page.route("**/api/windows**", (route) => {
@@ -167,10 +181,7 @@ export async function testTauriChildren(browser, app) {
       () => document.querySelector("#status").textContent === "已连接",
     );
     await page.waitForFunction(() => window.tauriFixture.sizeCalls.length > 0);
-    const initialPersistedSettings = await fetch(
-      `${app.origin}/api/settings?session=main`,
-      { headers: { "X-PenguX11VNC-Token": app.token } },
-    ).then((response) => response.json());
+    const initialPersistedSettings = await waitForSavedScale();
     assert(
       Number.isFinite(initialPersistedSettings.settings?.vncScale),
       "Initial Tauri VNC scale must be persisted",
@@ -369,10 +380,7 @@ export async function testTauriChildren(browser, app) {
     await page.waitForFunction(
       () => document.querySelector("#status").textContent === "已断开",
     );
-    const persistedSettings = await fetch(
-      `${app.origin}/api/settings?session=main`,
-      { headers: { "X-PenguX11VNC-Token": app.token } },
-    ).then((response) => response.json());
+    const persistedSettings = await readViewerSettings();
     assert(
       Math.abs(persistedSettings.settings.vncScale - scaleBeforeDisconnect) <
         0.003,

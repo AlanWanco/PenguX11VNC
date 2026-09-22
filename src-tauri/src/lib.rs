@@ -31,6 +31,7 @@ struct RuntimeState {
     manager: Mutex<Option<ManagerRuntime>>,
     node: Mutex<Option<Child>>,
     stopped: AtomicBool,
+    window_geometry_path: PathBuf,
 }
 
 #[derive(Default)]
@@ -582,6 +583,51 @@ fn prepare_debug_log(runtime: &Path) -> io::Result<()> {
     Ok(())
 }
 
+fn valid_window_dimension(value: f64, minimum: f64, maximum: f64) -> bool {
+    value.is_finite() && (minimum..=maximum).contains(&value)
+}
+
+fn load_main_window_size(path: &Path) -> Option<(f64, f64)> {
+    let data = fs::read(path).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&data).ok()?;
+    let width = value.get("width")?.as_f64()?;
+    let height = value.get("height")?.as_f64()?;
+    if valid_window_dimension(width, 320.0, 10000.0)
+        && valid_window_dimension(height, 200.0, 10000.0)
+    {
+        Some((width, height))
+    } else {
+        None
+    }
+}
+
+fn save_main_window_size(path: &Path, size: PhysicalSize<u32>, scale_factor: f64) {
+    if !scale_factor.is_finite() || scale_factor <= 0.0 {
+        return;
+    }
+    let width = f64::from(size.width) / scale_factor;
+    let height = f64::from(size.height) / scale_factor;
+    if !valid_window_dimension(width, 320.0, 10000.0)
+        || !valid_window_dimension(height, 200.0, 10000.0)
+    {
+        return;
+    }
+    let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+    let document = json!({ "version": 1, "width": width, "height": height });
+    if fs::write(&temporary, document.to_string()).is_err() {
+        return;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600));
+    }
+    if let Err(error) = fs::rename(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        eprintln!("无法保存主窗口尺寸：{error}");
+    }
+}
+
 fn bundled_node(root: &Path) -> PathBuf {
     if let Ok(path) = std::env::var("PENGUX11VNC_NODE") {
         return PathBuf::from(path);
@@ -703,14 +749,18 @@ pub fn run() {
                 manager.stop();
                 return Err(error.into());
             }
+            let window_geometry_path = runtime.join("window.json");
+            let (window_width, window_height) =
+                load_main_window_size(&window_geometry_path).unwrap_or((1280.0, 900.0));
             app.manage(RuntimeState {
                 manager: Mutex::new(Some(manager)),
                 node: Mutex::new(Some(node)),
                 stopped: AtomicBool::new(false),
+                window_geometry_path,
             });
             if let Err(error) = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
                 .title("PenguX11VNC")
-                .inner_size(1280.0, 900.0)
+                .inner_size(window_width, window_height)
                 .min_inner_size(320.0, 200.0)
                 .resizable(true)
                 .visible(true)
@@ -730,6 +780,14 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if window.label() == "main" {
+                if let WindowEvent::CloseRequested { .. } = event {
+                    if let Some(state) = window.app_handle().try_state::<RuntimeState>() {
+                        if let Ok(size) = window.inner_size() {
+                            let scale_factor = window.scale_factor().unwrap_or(1.0);
+                            save_main_window_size(&state.window_geometry_path, size, scale_factor);
+                        }
+                    }
+                }
                 match event {
                     WindowEvent::CloseRequested { api, .. }
                         if tray::close_action(window.app_handle(), "main")
@@ -740,7 +798,13 @@ pub fn run() {
                             eprintln!("无法隐藏主窗口，已保留窗口以便重试");
                         }
                     }
-                    WindowEvent::Resized(size) => enforce_main_window_aspect(window, *size),
+                    WindowEvent::Resized(size) => {
+                        if let Some(state) = window.app_handle().try_state::<RuntimeState>() {
+                            let scale_factor = window.scale_factor().unwrap_or(1.0);
+                            save_main_window_size(&state.window_geometry_path, *size, scale_factor);
+                        }
+                        enforce_main_window_aspect(window, *size);
+                    }
                     WindowEvent::ThemeChanged(_) => tray::refresh_theme(window.app_handle()),
                     WindowEvent::Destroyed => {
                         tray::shutdown(window.app_handle());
