@@ -128,11 +128,6 @@ gnome = x11.XInternAtom(display, b"x-special/gnome-copied-files", 0)
 kde4 = x11.XInternAtom(display, b"application/x-kde4-urilist", 0)
 kde5 = x11.XInternAtom(display, b"application/x-kde5-urilist", 0)
 kde_cut = x11.XInternAtom(display, b"application/x-kde-cutselection", 0)
-text_plain = x11.XInternAtom(display, b"text/plain", 0)
-text_plain_utf8 = x11.XInternAtom(display, b"text/plain;charset=utf-8", 0)
-utf8 = x11.XInternAtom(display, b"UTF8_STRING", 0)
-text = x11.XInternAtom(display, b"TEXT", 0)
-string = x11.XInternAtom(display, b"STRING", 0)
 atom = 4
 x11.XSetSelectionOwner(display, clipboard, window, CurrentTime)
 x11.XFlush(display)
@@ -150,11 +145,12 @@ try:
             continue
         request = event.request
         property_atom = request.property or request.target
+        # Advertise only file-list formats; never expose file URIs as ordinary text.
         if request.target == targets:
-            target_values = (targets, uri, gnome, kde4, kde5, kde_cut, text_plain, text_plain_utf8, utf8, text, string)
+            target_values = (targets, uri, gnome, kde4, kde5, kde_cut)
             values = (C.c_ulong * len(target_values))(*target_values)
             x11.XChangeProperty(display, request.requestor, property_atom, atom, 32, PropModeReplace, values, len(target_values))
-        elif request.target in (uri, kde4, kde5, text_plain, text_plain_utf8, utf8, text, string):
+        elif request.target in (uri, kde4, kde5):
             data = C.create_string_buffer(payload)
             x11.XChangeProperty(display, request.requestor, property_atom, request.target, 8, PropModeReplace, data, len(payload))
         elif request.target == gnome:
@@ -2256,6 +2252,12 @@ mod clipboard_tests {
         assert!(FILE_CLIPBOARD_X11_PYTHON.contains("kde_cut_payload = b\"0\""));
         assert!(FILE_CLIPBOARD_X11_PYTHON.contains("class SelectionNotify(C.Structure)"));
         assert!(FILE_CLIPBOARD_X11_PYTHON.contains("response.notify.property = property_atom"));
+        for text_target in ["text/plain", "UTF8_STRING", "TEXT", "STRING"] {
+            assert!(
+                !FILE_CLIPBOARD_X11_PYTHON.contains(text_target),
+                "file clipboard must not advertise text target: {text_target}"
+            );
+        }
     }
 
     #[test]
