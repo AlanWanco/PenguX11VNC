@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -50,6 +51,29 @@ class RemoteSessionTests(unittest.TestCase):
         self.assertEqual(REMOTE.vp8_payload_type(offer), 107)
         self.assertIsNone(
             REMOTE.vp8_payload_type("m=video 9\n" "a=rtpmap:107 H264/90000\n")
+        )
+
+    def test_final_answer_sdp_comes_from_gathered_local_description(self) -> None:
+        gathered_sdp = (
+            "v=0\r\n"
+            "m=video 40000 UDP/TLS/RTP/SAVPF 96\r\n"
+            "a=candidate:1 1 UDP 2122260223 192.0.2.1 40000 typ host\r\n"
+        )
+        description = SimpleNamespace(
+            sdp=SimpleNamespace(as_text=lambda: gathered_sdp)
+        )
+
+        class FakeWebRTC:
+            def get_property(self, name: str) -> object:
+                if name != "local-description":
+                    raise AssertionError(f"unexpected property: {name}")
+                return description
+
+        self.assertEqual(REMOTE.local_description_sdp(FakeWebRTC()), gathered_sdp)
+        self.assertIsNone(
+            REMOTE.local_description_sdp(
+                SimpleNamespace(get_property=lambda _name: None)
+            )
         )
 
     def test_bootstrap_does_not_buffer_followup_control_input(self) -> None:

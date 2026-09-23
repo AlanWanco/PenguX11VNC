@@ -622,6 +622,15 @@ def vp8_payload_type(sdp_text: str) -> int | None:
     return None
 
 
+def local_description_sdp(webrtc: object) -> str | None:
+    """Read the local SDP after ICE gathering has finalized it."""
+    description = webrtc.get_property("local-description")
+    if description is None or description.sdp is None:
+        return None
+    sdp_text = description.sdp.as_text()
+    return sdp_text if sdp_text else None
+
+
 def video(options: dict) -> None:
     """Run an opt-in VP8/WebRTC sender for one validated X11 window."""
     target = options.get("target")
@@ -717,20 +726,25 @@ def video(options: dict) -> None:
         raise RuntimeError("gstreamer-webrtc-link-failed")
 
     loop = GLib.MainLoop()
-    pending_answer = {"sdp": None}
+    pending_answer = {"ready": False}
     answer_sent = {"value": False}
 
     def send(message: dict) -> None:
         print(json.dumps(message, separators=(",", ":")), flush=True)
 
     def maybe_send_answer() -> None:
-        if answer_sent["value"] or not pending_answer["sdp"]:
+        if answer_sent["value"] or not pending_answer["ready"]:
             return
         state = webrtc.get_property("ice-gathering-state")
         if state != GstWebRTC.WebRTCICEGatheringState.COMPLETE:
             return
+        sdp_text = local_description_sdp(webrtc)
+        if sdp_text is None:
+            send({"type": "error", "error": "webrtc-local-description-unavailable"})
+            loop.quit()
+            return
         answer_sent["value"] = True
-        send({"type": "answer", "sdp": pending_answer["sdp"], "codec": "vp8"})
+        send({"type": "answer", "sdp": sdp_text, "codec": "vp8"})
 
     def on_answer_created(promise: object, _user_data: object = None) -> None:
         reply = promise.get_reply()
@@ -744,7 +758,7 @@ def video(options: dict) -> None:
             loop.quit()
             return
         webrtc.emit("set-local-description", answer, Gst.Promise.new())
-        pending_answer["sdp"] = answer.sdp.as_text()
+        pending_answer["ready"] = True
         maybe_send_answer()
 
     def on_gathering_state_changed(_element: object, _spec: object) -> None:
