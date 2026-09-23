@@ -212,6 +212,28 @@ export async function testTauriChildren(browser, app, mock) {
     await page.waitForFunction(
       () => !location.hash && !!sessionStorage.getItem("pengux11vnc-token"),
     );
+    await page.waitForFunction(
+      () => !document.querySelector("#connection-mode").disabled,
+    );
+    await page.selectOption("#connection-mode", "video");
+    assert.equal(
+      await page.locator("#connection-mode option:checked").textContent(),
+      "WebRTC 视频流（VP8 / UDP）",
+    );
+    await page.click("#settings-toggle");
+    await page.selectOption("#bitrate", "high");
+    assert.equal(await page.locator("#bitrate-value").textContent(), "高");
+    assert.match(await page.locator("#bitrate-help").textContent(), /VP8.*8/);
+    await page.selectOption("#frame-rate", "0");
+    assert.equal(
+      await page.locator("#frame-rate-value").textContent(),
+      "最高 · 60 FPS",
+    );
+    await page.selectOption("#bitrate", "lossless");
+    await page.selectOption("#frame-rate", "30");
+    await page.click("#settings-close");
+    await page.selectOption("#connection-mode", "vnc");
+    await page.waitForTimeout(180);
     await page.click("#connect");
     await page.waitForFunction(
       () => document.querySelector("#status").textContent === "已连接",

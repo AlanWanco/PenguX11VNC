@@ -121,6 +121,9 @@ export async function startMock() {
       for (const client of clients)
         if (!client.destroyed) client.write(Buffer.concat([header, payload]));
     },
+    disconnectClients() {
+      for (const client of clients) client.destroy();
+    },
     async close() {
       for (const client of clients) client.destroy();
       await new Promise((resolve) => server.close(resolve));

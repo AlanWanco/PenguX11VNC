@@ -848,19 +848,28 @@ impl ManagerState {
         Ok(target)
     }
 
-    fn video_options(&self) -> Value {
+    fn video_options(&self, overrides: &Value) -> Value {
         let section = self.profile.raw.get("video");
-        let fps = section
+        let configured_fps = section
             .and_then(|value| value.get("fps"))
             .and_then(Value::as_u64)
             .unwrap_or(60)
             .clamp(1, 60);
-        let bitrate = section
+        let requested_fps = overrides.get("fps").and_then(Value::as_u64);
+        let fps = requested_fps
+            .map(|value| if value == 0 { 60 } else { value.clamp(1, 60) })
+            .unwrap_or(configured_fps);
+        let configured_bitrate_kbps = section
             .and_then(|value| value.get("bitrateKbps"))
             .and_then(Value::as_u64)
             .unwrap_or(4000)
-            .clamp(250, 20_000)
-            * 1000;
+            .clamp(250, 20_000);
+        let bitrate_kbps = overrides
+            .get("bitrateKbps")
+            .and_then(Value::as_u64)
+            .unwrap_or(configured_bitrate_kbps)
+            .clamp(250, 20_000);
+        let bitrate = bitrate_kbps * 1000;
         let port_min = section
             .and_then(|value| value.get("udpPortStart"))
             .and_then(Value::as_u64)
@@ -889,7 +898,7 @@ impl ManagerState {
             ));
         }
         let target = self.video_target(session_id)?;
-        let mut options = self.video_options();
+        let mut options = self.video_options(&body);
         options["target"] = target;
         if let Some(previous) = self.videos.remove(session_id) {
             stop_video_session(previous);
@@ -933,9 +942,13 @@ impl ManagerState {
                                 return Err(io::Error::other("远端 WebRTC answer 缺少 SDP"));
                             };
                             self.videos.insert(session_id.to_string(), session);
+                            let bitrate_kbps =
+                                options["bitrate"].as_u64().unwrap_or(4_000_000) / 1000;
                             return Ok(json!({
                                 "answer": {"type": "answer", "sdp": answer},
                                 "codec": message.get("codec").cloned().unwrap_or(json!("vp8")),
+                                "fps": options["fps"],
+                                "bitrateKbps": bitrate_kbps,
                                 "portMin": options["portMin"],
                                 "portMax": options["portMax"],
                             }));
@@ -2299,5 +2312,22 @@ mod clipboard_tests {
         let size_error = validate_clipboard_files(std::slice::from_ref(&oversized)).unwrap_err();
         assert_eq!(size_error.kind(), io::ErrorKind::InvalidInput);
         fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod video_option_tests {
+    use super::*;
+
+    #[test]
+    fn video_options_honor_ui_fps_and_bitrate_bounds() {
+        let state = ManagerState::new(onboarding::empty_profile(), false, None);
+        let options = state.video_options(&json!({"fps": 15, "bitrateKbps": 1500}));
+        assert_eq!(options["fps"], 15);
+        assert_eq!(options["bitrate"], 1_500_000);
+
+        let unlimited = state.video_options(&json!({"fps": 0, "bitrateKbps": 50_000}));
+        assert_eq!(unlimited["fps"], 60);
+        assert_eq!(unlimited["bitrate"], 20_000_000);
     }
 }

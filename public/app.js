@@ -1,5 +1,10 @@
 import QQRFB from "./qq-rfb.js";
 import { ImeOverlay } from "./ime-overlay.js";
+import {
+  buildDisconnectReport,
+  sanitizeDiagnosticEvent,
+} from "./disconnect-report.js";
+import { videoStreamOverrides } from "./video-settings.js";
 
 const $ = (id) => document.getElementById(id);
 let rfb;
@@ -8,6 +13,12 @@ let videoEpoch = 0;
 let videoActive = false;
 let videoReceiverTimer;
 let videoFailureMessage;
+let videoFailureDetails;
+let videoSettingsRestartTimer;
+let connectionStartedAt;
+let disconnectReportTimer;
+let pageLeaving = false;
+const connectionDiagnostics = [];
 let manualDisconnectPending = false;
 let activeConnectionMode = "vnc";
 let connected = false;
@@ -249,8 +260,70 @@ const frameRateLabels = {
 };
 const connectionModeLabels = {
   vnc: "标准 VNC",
-  video: "实验视频流",
+  video: "WebRTC 视频流",
 };
+const videoBitrateLabels = {
+  lossless: "默认",
+  high: "高",
+  balanced: "均衡",
+  low: "低",
+};
+const vncBitrateOptions = {
+  lossless: "无损 · 画质优先",
+  high: "高 · 约 8 级 JPEG",
+  balanced: "均衡 · 约 6 级 JPEG",
+  low: "低 · 约 3 级 JPEG",
+};
+const videoBitrateOptions = {
+  lossless: "默认 · 配置目标码率",
+  high: "高 · 8 Mbps 目标",
+  balanced: "均衡 · 4 Mbps 目标",
+  low: "低 · 1.5 Mbps 目标",
+};
+const videoBitrateTargets = {
+  lossless: "配置默认目标码率",
+  high: "8 Mbps 目标",
+  balanced: "4 Mbps 目标",
+  low: "1.5 Mbps 目标",
+};
+function selectedTransportMode() {
+  return connected ? activeConnectionMode : settings.connectionMode;
+}
+function currentBitrateLabel() {
+  return selectedTransportMode() === "video"
+    ? videoBitrateLabels[settings.bitrate]
+    : bitrateLabels[settings.bitrate];
+}
+function currentFrameRateLabel() {
+  if (settings.frameRate === 0 && selectedTransportMode() === "video")
+    return "最高 · 60 FPS";
+  return frameRateLabels[settings.frameRate];
+}
+function updateTransportSettingsPresentation() {
+  const video = selectedTransportMode() === "video";
+  const bitrate = $("bitrate");
+  $("bitrate-label").textContent = video ? "视频码率档位" : "VNC 图像质量";
+  bitrate.setAttribute("aria-label", video ? "视频码率档位" : "VNC 图像质量");
+  for (const option of bitrate.options)
+    option.textContent = (video ? videoBitrateOptions : vncBitrateOptions)[
+      option.value
+    ];
+  $("bitrate-value").textContent = currentBitrateLabel();
+  $("bitrate-help").textContent = video
+    ? "VP8 始终为有损编码。默认档沿用配置的目标码率；高、均衡、低档分别使用 8、4、1.5 Mbps 目标。实际占用随画面变化。"
+    : "VNC 按画面变化压缩，不能承诺固定 Mbps；默认无损，其余档启用 JPEG/Tight 有损编码。";
+  const unlimitedFrameRate = $("frame-rate").querySelector('option[value="0"]');
+  unlimitedFrameRate.textContent = video ? "最高（视频上限 60 FPS）" : "不限";
+  $("frame-rate-value").textContent = currentFrameRateLabel();
+  $("frame-rate-help").textContent = video
+    ? "视频流会按此上限限制 VP8 编码帧率；0 表示尽可能快，最高 60 FPS。实际帧率取决于编码器和网络。"
+    : "限制 VNC 帧请求频率；0 表示不限。远端分辨率不会改变。";
+  $("transport-mode").textContent = video
+    ? `VP8 · ${videoBitrateTargets[settings.bitrate]}`
+    : settings.bitrate === "lossless"
+      ? "无损 · ZRLE 优先"
+      : `${bitrateLabels[settings.bitrate]} · JPEG/Tight`;
+}
 function syncSettingsControls() {
   $("wheel").value = settings.wheel;
   $("wheel-value").textContent = `${settings.wheel}%`;
@@ -273,7 +346,10 @@ function syncSettingsControls() {
 }
 function applySettings(value) {
   const previousClipboardSync = settings.clipboardSync;
+  const previousVideoSettings = `${settings.bitrate}:${settings.frameRate}`;
   settings = normalizeSettings({ ...settings, ...value });
+  const videoSettingsChanged =
+    previousVideoSettings !== `${settings.bitrate}:${settings.frameRate}`;
   if (!isMainSession && isTauriShell() && settings.vncScale !== null) {
     inheritedTauriScale = settings.vncScale;
     preferredTauriScale = settings.vncScale;
@@ -289,28 +365,32 @@ function applySettings(value) {
   setInteractive();
   if (connected && previousClipboardSync !== settings.clipboardSync)
     startClipboardSync();
+  if (videoSettingsChanged && connected && activeConnectionMode === "video")
+    scheduleVideoSettingsRestart();
 }
 function setFrameRate(value, persist = true) {
   const frameRate = Number(value);
+  const previousFrameRate = settings.frameRate;
   settings.frameRate = Object.hasOwn(frameRateLabels, frameRate)
     ? frameRate
     : 30;
   $("frame-rate").value = String(settings.frameRate);
-  $("frame-rate-value").textContent = frameRateLabels[settings.frameRate];
-  if (rfb) rfb.frameRate = settings.frameRate;
+  updateTransportSettingsPresentation();
+  if (rfb && activeConnectionMode !== "video")
+    rfb.frameRate = settings.frameRate;
   geometry();
+  if (previousFrameRate !== settings.frameRate) scheduleVideoSettingsRestart();
   if (persist) save();
 }
 function setBitrate(mode, persist = true) {
+  const previousBitrate = settings.bitrate;
   settings.bitrate = bitrateLabels[mode] ? mode : "lossless";
   $("bitrate").value = settings.bitrate;
-  $("bitrate-value").textContent = bitrateLabels[settings.bitrate];
-  $("transport-mode").textContent =
-    settings.bitrate === "lossless"
-      ? "无损 · ZRLE 优先"
-      : `${bitrateLabels[settings.bitrate]} · JPEG/Tight`;
-  if (rfb) rfb.bitrateMode = settings.bitrate;
+  updateTransportSettingsPresentation();
+  if (rfb && activeConnectionMode !== "video")
+    rfb.bitrateMode = settings.bitrate;
   geometry();
+  if (previousBitrate !== settings.bitrate) scheduleVideoSettingsRestart();
   if (persist) save();
 }
 function scale(mode, persist = true) {
@@ -612,7 +692,7 @@ function geometry(resizeWindow = false) {
     (canvas.getBoundingClientRect().width / canvas.width) * 100,
   );
   $("geometry").textContent =
-    `${canvas.width} × ${canvas.height} · ${percent}% · ${bitrateLabels[settings.bitrate]} · ${frameRateLabels[settings.frameRate]}`;
+    `${canvas.width} × ${canvas.height} · ${percent}% · ${currentBitrateLabel()} · ${currentFrameRateLabel()}`;
   const video = $("video-stream");
   if (!video.hidden) {
     const screenRect = $("screen").getBoundingClientRect();
@@ -641,7 +721,54 @@ async function api(path, options = {}) {
   headers.set("X-PenguX11VNC-Token", token || "");
   return fetch(path, { ...options, headers });
 }
+function recordConnectionDiagnostic(event, details = {}) {
+  const record = sanitizeDiagnosticEvent(event, details);
+  if (!record) return;
+  connectionDiagnostics.push(record);
+  if (connectionDiagnostics.length > 30) connectionDiagnostics.shift();
+}
+function coarsePlatform() {
+  const platform = String(navigator.platform || "").toLowerCase();
+  if (platform.includes("mac")) return "macOS";
+  if (platform.includes("win")) return "Windows";
+  if (platform.includes("linux")) return "Linux";
+  return "unknown";
+}
+function showDisconnectReport({ transport, clean, reason, videoFailure }) {
+  clearTimeout(disconnectReportTimer);
+  if (pageLeaving) return;
+  disconnectReportTimer = setTimeout(() => {
+    disconnectReportTimer = undefined;
+    if (pageLeaving) return;
+    const generatedAt = new Date().toISOString();
+    $("disconnect-report").value = buildDisconnectReport({
+      generatedAt,
+      connectionStartedAt,
+      runtime: isTauriShell() ? "Tauri" : "Browser",
+      platform: coarsePlatform(),
+      transport,
+      sessionType: isMainSession ? "main" : "child",
+      frameRate: settings.frameRate,
+      bitrateMode: settings.bitrate,
+      autoRecovery: isMainSession && connectionWanted,
+      clean,
+      reason,
+      videoFailure,
+      events: connectionDiagnostics,
+    });
+    $("disconnect-report-copy-status").textContent =
+      "报告仅保留连接状态与统计信息；不会自动发送。";
+    const dialog = $("disconnect-report-dialog");
+    if (!dialog.open) {
+      void setMacRemoteShortcuts(false);
+      dialog.showModal();
+      $("disconnect-report").focus();
+      updateMacRemoteShortcuts();
+    }
+  }, 250);
+}
 function debugClient(event, details = {}) {
+  recordConnectionDiagnostic(event, details);
   if (!debugClientEnabled) return;
   void api(`/api/debug?session=${encodeURIComponent(sessionId)}`, {
     method: "POST",
@@ -1500,7 +1627,23 @@ function waitForIceGathering(peer, timeoutMs = 5000) {
     timer = setTimeout(done, timeoutMs);
   });
 }
+function scheduleVideoSettingsRestart() {
+  if (!connected || activeConnectionMode !== "video" || !videoPeer) return;
+  clearTimeout(videoSettingsRestartTimer);
+  videoSettingsRestartTimer = setTimeout(() => {
+    videoSettingsRestartTimer = undefined;
+    if (!connected || activeConnectionMode !== "video" || !videoPeer) return;
+    $("video-status").textContent = "正在重新协商视频码率与帧率……";
+    void (async () => {
+      await stopVideoStream("正在应用视频设置", false);
+      if (connected && activeConnectionMode === "video")
+        await startVideoStream();
+    })();
+  }, 300);
+}
 async function stopVideoStream(reason = "", resumeRfb = true) {
+  clearTimeout(videoSettingsRestartTimer);
+  videoSettingsRestartTimer = undefined;
   videoEpoch++;
   videoActive = false;
   clearInterval(videoReceiverTimer);
@@ -1582,11 +1725,26 @@ async function collectVideoStats(peer) {
   }
 }
 async function failVideoStream(error, peerState = "unknown/unknown") {
+  if (videoFailureMessage) return;
   const message = `视频流不可用：${error?.message || String(error)}（${peerState}）。未自动回退 VNC，请切换“标准 VNC”后重新连接。`;
-  debugClient("video-failure", { sessionId, message });
+  videoFailureDetails = {
+    name: error?.name || "Error",
+    connectionState: videoPeer?.connectionState || "unknown",
+    iceConnectionState: videoPeer?.iceConnectionState || "unknown",
+  };
+  debugClient("video-failure", {
+    sessionId,
+    ...videoFailureDetails,
+  });
   videoFailureMessage = message;
   await stopVideoStream("视频流失败 · 未连接", false);
   if (rfb) rfb.disconnect();
+}
+function formatVideoBitrate(kbps) {
+  const value = Number(kbps);
+  if (!Number.isFinite(value) || value <= 0) return "配置码率";
+  const mbps = value / 1000;
+  return `${Number.isInteger(mbps) ? mbps : mbps.toFixed(1)} Mbps`;
 }
 async function startVideoStream() {
   if (
@@ -1601,9 +1759,10 @@ async function startVideoStream() {
     return;
   }
   const epoch = ++videoEpoch;
+  const streamOptions = videoStreamOverrides(settings);
   if (rfb) rfb.videoMode = true;
   document.body.classList.add("video-pending");
-  debugClient("video-start", { sessionId, epoch });
+  debugClient("video-start", { sessionId, epoch, ...streamOptions });
   const video = $("video-stream");
   video.muted = true;
   video.autoplay = true;
@@ -1671,7 +1830,6 @@ async function startVideoStream() {
             debugClient("video-play-error", {
               sessionId,
               name: error?.name || "Error",
-              message: error?.message || String(error),
             });
           if (error?.name === "AbortError" && !cleanupAbort) {
             playStarted = false;
@@ -1744,17 +1902,21 @@ async function startVideoStream() {
         body: JSON.stringify({
           type: peer.localDescription.type,
           sdp: peer.localDescription.sdp,
+          ...streamOptions,
         }),
       },
     );
     if (!response.ok)
       throw new Error((await response.text()) || "视频流启动失败");
     const result = await response.json();
+    if (epoch !== videoEpoch || videoPeer !== peer) return;
     debugClient("video-answer", {
       sessionId,
       codec: result.codec || "unknown",
       sdpLength: result.answer?.sdp?.length || 0,
       hasVideo: /(^|\n)m=video /m.test(result.answer?.sdp || ""),
+      fps: result.fps,
+      bitrateKbps: result.bitrateKbps,
       local: summarizeVideoSdp(peer.localDescription?.sdp),
       remote: summarizeVideoSdp(result.answer?.sdp),
     });
@@ -1779,14 +1941,17 @@ async function startVideoStream() {
       ),
     ]);
     if (epoch !== videoEpoch) return;
+    const effectiveFrameRate = Number(result.fps) || streamOptions.fps;
+    const effectiveBitrate = Number(result.bitrateKbps);
     $("video-status").textContent =
-      `WebRTC / ${result.codec || "VP8"} · ${result.portMin}-${result.portMax} UDP`;
+      `WebRTC / ${result.codec || "VP8"} · ${effectiveFrameRate} FPS · ${formatVideoBitrate(effectiveBitrate)} · UDP ${result.portMin}-${result.portMax}`;
+    $("transport-mode").textContent =
+      `VP8 · ${formatVideoBitrate(effectiveBitrate)} · ${effectiveFrameRate} FPS`;
   } catch (error) {
     if (epoch !== videoEpoch) return;
     debugClient("video-error", {
       sessionId,
       name: error?.name || "Error",
-      message: error?.message || String(error),
     });
     const peerState = `${peer.connectionState || "unknown"}/${peer.iceConnectionState || "unknown"}`;
     debugClient("video-stats", {
@@ -1832,6 +1997,13 @@ async function connect(prepare = true) {
   state("正在连接", "connecting");
   activeConnectionMode = settings.connectionMode;
   videoFailureMessage = undefined;
+  videoFailureDetails = undefined;
+  connectionStartedAt = new Date().toISOString();
+  connectionDiagnostics.length = 0;
+  recordConnectionDiagnostic("connect-attempt", { mode: activeConnectionMode });
+  updateTransportSettingsPresentation();
+  $("connection-mode-settings").textContent =
+    connectionModeLabels[activeConnectionMode];
   $("connection-method").textContent =
     activeConnectionMode === "video" ? "视频模式 · 协商中" : "标准 VNC";
   $("video-status").textContent =
@@ -1875,8 +2047,10 @@ async function connect(prepare = true) {
     client.scaleViewport = settings.scale === "fit";
     client.viewOnly = settings.viewOnly;
     client.wheelSensitivity = settings.wheel / 100;
-    client.bitrateMode = settings.bitrate;
-    client.frameRate = settings.frameRate;
+    if (activeConnectionMode !== "video") {
+      client.bitrateMode = settings.bitrate;
+      client.frameRate = settings.frameRate;
+    }
     client.addEventListener("credentialsrequired", () => {
       void setMacRemoteShortcuts(false).finally(() => {
         if (client !== rfb) return;
@@ -1927,17 +2101,26 @@ async function connect(prepare = true) {
       if (activeConnectionMode === "video") void startVideoStream();
     });
     client.addEventListener("disconnect", (event) => {
+      const socketClose = client.socketCloseInfo || {};
       debugClient("vnc-disconnect", {
         sessionId,
         clean: event.detail.clean,
         child: !isMainSession,
+        socketCloseCode: socketClose.code,
+        socketCloseWasClean: socketClose.wasClean,
+        socketCloseReasonLength: socketClose.reasonLength,
+        socketState: socketClose.state,
       });
       connected = false;
       void setMacRemoteShortcuts(false);
-      activeConnectionMode = settings.connectionMode;
+      const disconnectedMode = activeConnectionMode;
       const failure = videoFailureMessage;
+      const failureDetails = videoFailureDetails;
       videoFailureMessage = undefined;
+      videoFailureDetails = undefined;
       const skipVideoStop = manualDisconnectPending;
+      const showReport = !skipVideoStop;
+      activeConnectionMode = settings.connectionMode;
       manualDisconnectPending = false;
       if (!skipVideoStop) void stopVideoStream();
       remoteFilePasteSignature = undefined;
@@ -1972,10 +2155,24 @@ async function connect(prepare = true) {
         : "未连接";
       $("connection-mode-settings").textContent =
         connectionModeLabels[settings.connectionMode];
+      updateTransportSettingsPresentation();
       $("video-status").textContent = failure || "连接方式可在主页选择。";
       $("geometry").textContent = "原始像素 · 等比例缩放";
       setInteractive();
-      if (!event.detail.clean)
+      if (showReport)
+        showDisconnectReport({
+          transport: disconnectedMode,
+          clean: event.detail.clean,
+          reason: failure
+            ? "video-stream-failure"
+            : event.detail.clean
+              ? "remote-closed-connection"
+              : "unexpected-disconnect",
+          videoFailure: failureDetails,
+        });
+      if (showReport && disconnectedMode === "video")
+        toast("视频流连接中断，已生成错误报告。");
+      else if (!event.detail.clean)
         toast("连接中断，请检查 SSH 隧道或远端 x11vnc。");
     });
     client.addEventListener("clipboard", async (event) => {
@@ -2130,10 +2327,9 @@ $("setup-open").addEventListener("click", openSetup);
 $("setup-edit").addEventListener("click", openSetup);
 $("connect").addEventListener("click", () => void connect());
 $("bitrate").value = settings.bitrate;
-$("bitrate-value").textContent = bitrateLabels[settings.bitrate];
-$("bitrate").addEventListener("change", () => setBitrate($("bitrate").value));
 $("frame-rate").value = String(settings.frameRate);
-$("frame-rate-value").textContent = frameRateLabels[settings.frameRate];
+updateTransportSettingsPresentation();
+$("bitrate").addEventListener("change", () => setBitrate($("bitrate").value));
 $("frame-rate").addEventListener("change", () =>
   setFrameRate($("frame-rate").value),
 );
@@ -2141,7 +2337,30 @@ $("connection-mode").addEventListener("change", () => {
   if (connected || !isMainSession) return;
   settings.connectionMode =
     $("connection-mode").value === "video" ? "video" : "vnc";
+  $("connection-mode-settings").textContent =
+    connectionModeLabels[settings.connectionMode];
+  updateTransportSettingsPresentation();
   save();
+});
+$("disconnect-report-dialog").addEventListener("close", () =>
+  updateMacRemoteShortcuts(),
+);
+$("disconnect-report-copy").addEventListener("click", async () => {
+  const report = $("disconnect-report").value;
+  const previousClipboardValue = localClipboardValue;
+  localClipboardValue = report;
+  try {
+    await writeSystemClipboardText(report);
+    $("disconnect-report-copy-status").textContent =
+      "错误报告已复制到本机剪贴板；不会发送到远端。";
+  } catch {
+    if (localClipboardValue === report)
+      localClipboardValue = previousClipboardValue;
+    $("disconnect-report").focus();
+    $("disconnect-report").select();
+    $("disconnect-report-copy-status").textContent =
+      "自动复制失败，报告已选中；请按 Ctrl+C（macOS：⌘C）复制。";
+  }
 });
 $("disconnect").addEventListener("click", () =>
   stopMainConnection().catch(() => toast("会话清理失败，请检查 SSH。")),
@@ -2183,9 +2402,14 @@ if (isTauriShell() && isMainSession) {
   $("tauri-close-hint").hidden = false;
 }
 $("window-close").addEventListener("click", () => {
+  const closingChild = !isMainSession;
+  if (closingChild && rfb) manualDisconnectPending = true;
   currentTauriWindow()
     ?.close()
-    .catch(() => toast("窗口关闭失败，请重试。"));
+    .catch(() => {
+      if (closingChild) manualDisconnectPending = false;
+      toast("窗口关闭失败，请重试。");
+    });
 });
 document.querySelector(".titlebar").addEventListener("pointerdown", (event) => {
   if (
@@ -2323,6 +2547,10 @@ $("send-clipboard").addEventListener("click", () => {
 });
 $("screen").addEventListener("scroll", () => imeOverlay?.position(), true);
 window.addEventListener("pagehide", () => {
+  pageLeaving = true;
+  clearTimeout(disconnectReportTimer);
+  disconnectReportTimer = undefined;
+  if (!isMainSession && rfb) manualDisconnectPending = true;
   connectionWanted = false;
   recoveryEpoch++;
   clearTimeout(recoveryTimer);

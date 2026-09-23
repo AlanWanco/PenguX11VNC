@@ -110,23 +110,21 @@ chmod 600 ~/.config/pengux11vnc/connections.json
 | `window.display` / `xauthority` / `id` | Linux Xwayland 会话信息                                                                                               |
 | `helpers.windowList` / `imeCapture`    | 远端 helper 的绝对路径                                                                                                |
 | `clipboard.sync`                       | 是否允许此配置档启用剪贴板同步，默认 `false`                                                                          |
-| `viewer.bitrate`                       | `lossless`、`high`、`balanced`、`low`；默认无损                                                                       |
-| `viewer.frameRate`                     | `0` 不限，或 `5/10/15/24/30/60`；默认 `30`                                                                            |
+| `viewer.bitrate`                       | `lossless`、`high`、`balanced`、`low`；VNC 默认无损，视频默认沿用 `video.bitrateKbps`；其他视频档目标为 8/4/1.5 Mbps  |
+| `viewer.frameRate`                     | `0` 不限，或 `5/10/15/24/30/60`；默认 `30`，视频的 `0` 表示最高 60 FPS                                                |
 | `viewer.connectionMode`                | `vnc` 或 `video`；仅在主页连接前选择，默认 `vnc`                                                                      |
 | `video.codec`                          | 当前为 `vp8`                                                                                                          |
-| `video.fps`                            | `30` 或 `60`；默认 `60`                                                                                               |
-| `video.bitrateKbps`                    | 软件编码目标码率；默认 `4000`                                                                                         |
+| `video.fps`                            | `30` 或 `60`；默认 `60`，作为客户端未指定帧率时的回退值                                                               |
+| `video.bitrateKbps`                    | 默认视频软件编码目标码率；默认 `4000`，码率“默认”档沿用此值                                                           |
 | `video.udpPortStart` / `udpPortEnd`    | 远端 WebRTC UDP 端口范围；默认 `40000-40100`                                                                          |
 
 主窗口运行时修改的显示设置会保存到 `~/.config/pengux11vnc/settings.json`；QQ 子窗口继承主窗口设置。
 
-### 实验性 WebRTC 视频流
+### WebRTC 视频流
 
-在主页连接前选择「实验性视频流」后，RFB 只负责键盘、鼠标和剪贴板，远端按 QQ X11 窗口 XID 启动临时 GStreamer/VP8/WebRTC 进程，前端用 UDP 接收唯一画面。状态栏会显示当前实际方式。视频失败时不会自动回退到 VNC，而是断开本次连接并回到主页重新选择。当前不捕获整个桌面，也不会创建第二个 QQ。
+在主页连接前选择「WebRTC 视频流」后，RFB 负责键盘、鼠标和剪贴板，远端按 QQ X11 窗口 XID 启动临时 GStreamer/VP8/WebRTC 进程，前端通过 UDP 接收唯一画面。视频码率与帧率使用设置面板中的同一组选项：默认档沿用连接配置的 `video.bitrateKbps`，高/均衡/低档分别设为 8/4/1.5 Mbps 目标；帧率 `0` 表示尽可能快、上限 60 FPS。目标码率不是固定网络占用，实际流量会随画面变化。已连接时调整任一参数会重新协商视频流。
 
-远端需要额外具备 `gstreamer`、`gst-plugins-base`、`gst-plugins-good`、`gst-plugins-bad` 和 GStreamer 的 Python GI 绑定；未来 H.264 实验才需要额外的 `gst-plugins-ugly`/x264。应用不会自动安装。需要在远端防火墙放行配置的 UDP 端口范围，建议仅允许本机客户端 IP。未放行、WebRTC 协商失败或编码器不可用时，本次视频连接会断开，不会自动切换到 VNC；普通 VNC 连接不受影响。
-
-当前实验只启用 VP8/60 FPS，并通过 SSH 传递信令；视频进程随会话启动和退出，不是远端常驻服务。
+视频失败时不会自动回退到 VNC，而是断开本次连接并回到主页重新选择。当前只提供 VP8；不捕获整个桌面，也不会创建第二个 QQ。远端需要额外具备 `gstreamer`、`gst-plugins-base`、`gst-plugins-good`、`gst-plugins-bad` 和 GStreamer 的 Python GI 绑定；应用不会自动安装。需要在远端防火墙放行配置的 UDP 端口范围，建议仅允许本机客户端 IP。未放行、WebRTC 协商失败或编码器不可用时，本次视频连接会断开，普通 VNC 连接不受影响。视频信令经 SSH 传递，媒体进程随会话启动和退出，不是远端常驻服务。
 
 Tauri 主窗口支持拖放文件：连接后将一个或多个普通文件拖到窗口，松开并确认后会通过现有 SSH/SCP 流程上传到远端 Downloads，再在 QQ 中手动按 `Ctrl+V`（macOS 使用 `Cmd+V`）。目录、重复文件和单次合计超过 50 MiB 的内容会被拒绝。
 

@@ -91,7 +91,7 @@
           autoplay
           muted
           hidden
-          aria-label="实验性远程视频画面"
+          aria-label="远程视频画面"
         ></video>
       </div>
       <div id="file-drop-overlay" aria-hidden="true">
@@ -110,7 +110,7 @@
           <span>连接方式</span>
           <select id="connection-mode">
             <option value="vnc">标准 VNC（稳定）</option>
-            <option value="video">实验性视频流（VP8 / UDP / 60 FPS）</option>
+            <option value="video">WebRTC 视频流（VP8 / UDP）</option>
           </select>
         </label>
         <small id="welcome-hint"></small>
@@ -132,18 +132,18 @@
         </div>
         <section class="setting-section">
           <div class="setting-label">
-            <label for="bitrate">传输码率</label>
+            <label id="bitrate-label" for="bitrate">VNC 图像质量</label>
             <output id="bitrate-value" for="bitrate">无损</output>
           </div>
-          <select id="bitrate" aria-label="传输码率">
+          <select id="bitrate" aria-label="VNC 图像质量">
             <option value="lossless">无损 · 画质优先</option>
             <option value="high">高 · 约 8 级 JPEG</option>
             <option value="balanced">均衡 · 约 6 级 JPEG</option>
             <option value="low">低 · 约 3 级 JPEG</option>
           </select>
-          <p class="help">
-            VNC 按画面变化压缩，不能承诺固定 Mbps；低档会启用有损
-            JPEG，默认无损。
+          <p id="bitrate-help" class="help">
+            VNC 按画面变化压缩，不能承诺固定 Mbps；默认无损，其余档启用
+            JPEG/Tight 有损编码。
           </p>
         </section>
         <section class="setting-section">
@@ -152,7 +152,8 @@
             ><b id="connection-mode-settings">标准 VNC</b>
           </div>
           <p id="video-status" class="help">
-            视频模式为实验功能；RFB 负责键鼠与剪贴板控制。
+            视频使用 VP8；RFB 负责键鼠与剪贴板控制，视频失败时不会自动回退到
+            VNC。
           </p>
         </section>
         <section class="setting-section">
@@ -169,8 +170,8 @@
             <option value="30">30 FPS</option>
             <option value="60">60 FPS</option>
           </select>
-          <p class="help">
-            限制本地向 VNC 请求画面的频率，远端 QQ 刷新率不会被修改。
+          <p id="frame-rate-help" class="help">
+            限制 VNC 帧请求频率；0 表示不限。远端分辨率不会改变。
           </p>
         </section>
         <section class="setting-section">
@@ -315,6 +316,37 @@
         <div class="dialog-actions">
           <button id="password-cancel" type="button">取消</button
           ><button class="primary" type="submit">连接</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog
+      id="disconnect-report-dialog"
+      class="disconnect-report-dialog"
+      aria-labelledby="disconnect-report-title"
+      aria-describedby="disconnect-report-note"
+    >
+      <form method="dialog">
+        <span class="eyebrow">CONNECTION DIAGNOSTICS</span>
+        <h2 id="disconnect-report-title">连接意外中断</h2>
+        <p id="disconnect-report-note">
+          可复制下方脱敏报告供排查。报告不包含凭据、主机地址、剪贴板内容或文件路径，也不会自动发送。
+        </p>
+        <textarea
+          id="disconnect-report"
+          rows="14"
+          readonly
+          spellcheck="false"
+        ></textarea>
+        <p
+          id="disconnect-report-copy-status"
+          role="status"
+          aria-live="polite"
+        ></p>
+        <div class="dialog-actions">
+          <button id="disconnect-report-close" value="close">关闭</button>
+          <button id="disconnect-report-copy" class="primary" type="button">
+            复制错误报告
+          </button>
         </div>
       </form>
     </dialog>

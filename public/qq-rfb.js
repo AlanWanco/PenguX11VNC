@@ -126,6 +126,20 @@ export default class QQRFB extends RFB {
     }, delay);
   }
 
+  get socketCloseInfo() {
+    return this._socketCloseInfo;
+  }
+
+  _socketClose(event) {
+    this._socketCloseInfo = {
+      code: Number.isInteger(event?.code) ? event.code : null,
+      wasClean: event?.wasClean === true,
+      reasonLength: typeof event?.reason === "string" ? event.reason.length : 0,
+      state: this._rfbConnectionState || "unknown",
+    };
+    super._socketClose(event);
+  }
+
   _framebufferUpdate() {
     const result = super._framebufferUpdate();
     if (result) this._frameRequestInFlight = false;

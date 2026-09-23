@@ -34,6 +34,19 @@ try {
   await page.waitForTimeout(300);
   assert.deepEqual(errors, []);
   assert.equal(new URL(page.url()).hash, "");
+  const textSelection = await page.evaluate(() => ({
+    interface: getComputedStyle(document.body).userSelect,
+    clipboard: getComputedStyle(document.querySelector("#clipboard"))
+      .userSelect,
+    report: getComputedStyle(document.querySelector("#disconnect-report"))
+      .userSelect,
+    status: getComputedStyle(document.querySelector("#video-status"))
+      .userSelect,
+  }));
+  assert.equal(textSelection.interface, "none");
+  assert.equal(textSelection.clipboard, "text");
+  assert.equal(textSelection.report, "text");
+  assert.equal(textSelection.status, "text");
   assert.equal(await page.locator("#tauri-close-hint").isHidden(), true);
   assert.equal(
     await page.locator("#window-close").getAttribute("aria-label"),
@@ -279,6 +292,11 @@ try {
   await page.waitForFunction(
     () => document.querySelector("#status").textContent === "已断开",
   );
+  assert.equal(
+    await page.locator("#disconnect-report-dialog").isVisible(),
+    false,
+    "A user-requested clean disconnect must not open an error report",
+  );
   await page.click("#settings-close");
   await page.click("#connect");
   await page.waitForFunction(
@@ -291,8 +309,82 @@ try {
   );
   assert.deepEqual(errors, []);
   await testTauriChildren(browser, app, mock);
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"], {
+    origin: new URL(app.url).origin,
+  });
+  const localToken = await page.evaluate(() =>
+    sessionStorage.getItem("pengux11vnc-token"),
+  );
+  mock.disconnectClients();
+  await page.locator("#disconnect-report-dialog").waitFor({ state: "visible" });
+  const disconnectReport = await page
+    .locator("#disconnect-report")
+    .inputValue();
+  const parsedDisconnectReport = JSON.parse(disconnectReport);
+  assert.equal(parsedDisconnectReport.transport, "vnc");
+  assert.equal(
+    parsedDisconnectReport.disconnect.reason,
+    parsedDisconnectReport.disconnect.clean
+      ? "remote-closed-connection"
+      : "unexpected-disconnect",
+  );
+  const vncDisconnect = parsedDisconnectReport.recentEvents.find(
+    (event) => event.event === "vnc-disconnect",
+  );
+  assert(vncDisconnect, "Report must include the safe RFB disconnect event");
+  assert.equal(typeof vncDisconnect.socketCloseCode, "number");
+  assert.equal(typeof vncDisconnect.socketCloseWasClean, "boolean");
+  assert.equal(typeof vncDisconnect.socketCloseReasonLength, "number");
+  assert.equal(vncDisconnect.socketState, "connected");
+  assert.equal(parsedDisconnectReport.autoRecovery, false);
+  const transitionEvent = parsedDisconnectReport.recentEvents.find(
+    (event) => event.event === "video-connection-state",
+  );
+  if (transitionEvent)
+    assert.notEqual(transitionEvent.transition, "video-connection-state");
+  assert(
+    !disconnectReport.includes(localToken),
+    "Report leaked the local token",
+  );
+  await page.click("#disconnect-report-copy");
+  assert.equal(
+    await page.evaluate(() => navigator.clipboard.readText()),
+    disconnectReport,
+    "The report copy action must write to the local clipboard",
+  );
+  assert.match(
+    await page.locator("#disconnect-report-copy-status").textContent(),
+    /不会发送到远端/,
+  );
+  await page.click("#disconnect-report-close");
+  assert.equal(
+    await page.locator("#disconnect-report-dialog").isVisible(),
+    false,
+  );
+  const closingPage = await browser.newPage();
+  const closingPageErrors = [];
+  closingPage.on("pageerror", (error) => closingPageErrors.push(error.message));
+  await closingPage.goto(app.url);
+  await closingPage.waitForFunction(
+    () => !location.hash && !!sessionStorage.getItem("pengux11vnc-token"),
+  );
+  await closingPage.click("#connect");
+  await closingPage.waitForFunction(
+    () => document.querySelector("#status").textContent === "已连接",
+  );
+  await closingPage.evaluate(() => window.dispatchEvent(new Event("pagehide")));
+  mock.disconnectClients();
+  await closingPage.waitForTimeout(350);
+  assert.equal(
+    await closingPage.locator("#disconnect-report-dialog").isVisible(),
+    false,
+    "Closing a window must cancel its pending disconnect dialog",
+  );
+  await closingPage.close();
+  assert.deepEqual(closingPageErrors, []);
+  assert.deepEqual(errors, []);
   console.log(
-    "PASS: lossless negotiation, frame rate, 3 aspect ratios, scaled pointer/IME overlay, F11/brackets, 25% wheel, view-only, reconnect, Unicode guard",
+    "PASS: video settings mapping, sanitized disconnect report, copy action, VNC controls, scaling, IME overlay, input, wheel, reconnect, clipboard guard",
   );
 } finally {
   await browser.close();

@@ -17,12 +17,31 @@ body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
 }
 button,
 input,
 select,
 textarea {
   font: inherit;
+  -webkit-tap-highlight-color: transparent;
+}
+input,
+textarea,
+[contenteditable="true"],
+.selectable-text,
+#recovery-status,
+#video-status,
+#clipboard-status,
+#clipboard-files-status {
+  -webkit-user-select: text;
+  user-select: text;
+}
+::selection {
+  color: #241d32;
+  background: var(--accent);
 }
 button {
   border: 1px solid transparent;
@@ -44,9 +63,13 @@ button:disabled {
 }
 button:focus-visible,
 input:focus-visible,
+select:focus-visible,
 textarea:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 3px;
+}
+:focus:not(:focus-visible) {
+  outline: none;
 }
 button.active {
   background: #cbb5f716;
@@ -541,10 +564,6 @@ select {
   padding: 10px 12px;
   cursor: pointer;
 }
-select:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 3px;
-}
 input[type="range"] {
   width: 100%;
   accent-color: var(--accent);
@@ -719,6 +738,25 @@ dialog {
   width: min(440px, calc(100vw - 32px));
   max-height: min(80dvh, 640px);
   overflow: auto;
+}
+.disconnect-report-dialog {
+  width: min(620px, calc(100vw - 32px));
+  max-height: min(88dvh, 800px);
+  overflow: auto;
+}
+#disconnect-report {
+  display: block;
+  min-height: 240px;
+  max-height: 46dvh;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre;
+}
+#disconnect-report-copy-status {
+  min-height: 1.8em;
+  margin: 6px 0;
 }
 .file-upload-list {
   display: grid;
