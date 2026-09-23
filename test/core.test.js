@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import net from "node:net";
 import { once } from "node:events";
-import { mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createCipheriv } from "node:crypto";
@@ -325,6 +325,125 @@ test("closing a child VNC websocket reclaims its remote session", async (t) => {
   await once(ws, "close");
   await new Promise((resolve) => setTimeout(resolve, 800));
   assert.deepEqual(deleted, ["/sessions/window-2"]);
+});
+
+test("window watcher streams snapshots and stops its SSH child when the client leaves", async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), "pengux11vnc-watch-"));
+  const executable = path.join(directory, "ssh");
+  const stopped = path.join(directory, "watch-stopped");
+  await writeFile(
+    executable,
+    `#!/usr/bin/env node\nconst fs = require("node:fs");\nprocess.stdin.once("data", () => { process.stdout.write(JSON.stringify({type:"snapshot",reason:"initial",windows:[{id:"0x2",mapped:true,depth:2,x:0,y:0,width:800,height:600}]}) + "\\n"); });\nprocess.on("SIGTERM", () => { fs.writeFileSync(process.env.WATCH_STOP_MARKER, "stopped"); process.exit(0); });\nsetInterval(() => {}, 1000);\n`,
+  );
+  await chmod(executable, 0o700);
+  const originalPath = process.env.PATH;
+  const originalMarker = process.env.WATCH_STOP_MARKER;
+  process.env.PATH = `${directory}${path.delimiter}${originalPath || ""}`;
+  process.env.WATCH_STOP_MARKER = stopped;
+  const app = await startServer({
+    port: 0,
+    connection: {
+      id: "window-watch-test",
+      ssh: { user: "user", host: "example.invalid", port: 22 },
+      window: {
+        display: ":0",
+        xauthority: "/tmp/test-xauthority",
+        id: "0x1",
+        className: "QQ",
+      },
+      children: { enabled: true },
+    },
+  });
+  try {
+    const response = await fetch(
+      `${app.origin}/api/windows/watch?session=main`,
+      { headers: { "X-PenguX11VNC-Token": app.token } },
+    );
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get("content-type"), /application\/x-ndjson/);
+    const reader = response.body.getReader();
+    const { value } = await reader.read();
+    assert.match(new TextDecoder().decode(value), /"type":"snapshot"/);
+    await reader.cancel();
+    const deadline = Date.now() + 3000;
+    while (Date.now() < deadline) {
+      try {
+        assert.equal(await readFile(stopped, "utf8"), "stopped");
+        break;
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    }
+    assert.equal(await readFile(stopped, "utf8"), "stopped");
+  } finally {
+    await app.close();
+    process.env.PATH = originalPath;
+    if (originalMarker === undefined) delete process.env.WATCH_STOP_MARKER;
+    else process.env.WATCH_STOP_MARKER = originalMarker;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("window watcher proxy forwards Rust-manager snapshots and cancellation", async () => {
+  let closed;
+  const streamClosed = new Promise((resolve) => (closed = resolve));
+  const manager = http.createServer((req, res) => {
+    if (req.url !== "/windows/watch") return res.writeHead(404).end();
+    res.writeHead(200, { "Content-Type": "application/x-ndjson" });
+    res.write(
+      `${JSON.stringify({
+        type: "snapshot",
+        reason: "initial",
+        windows: [{ id: "0x3", mapped: true, width: 900, height: 700 }],
+      })}\n`,
+    );
+    const heartbeat = setInterval(() => res.write("{}\n"), 100);
+    res.on("close", () => {
+      clearInterval(heartbeat);
+      closed();
+    });
+  });
+  await new Promise((resolve) => manager.listen(0, "127.0.0.1", resolve));
+  const app = await startServer({
+    port: 0,
+    manager: {
+      url: `http://127.0.0.1:${manager.address().port}`,
+      token: "manager-test-token",
+    },
+    connection: {
+      id: "watch-proxy-test",
+      children: { enabled: true },
+      window: { id: "0x1", className: "QQ" },
+    },
+  });
+  try {
+    const response = await fetch(
+      `${app.origin}/api/windows/watch?session=main`,
+      { headers: { "X-PenguX11VNC-Token": app.token } },
+    );
+    assert.equal(response.status, 200);
+    const reader = response.body.getReader();
+    const { value } = await reader.read();
+    assert.match(new TextDecoder().decode(value), /"id":"0x3"/);
+    await reader.cancel();
+    let closeTimeout;
+    try {
+      await Promise.race([
+        streamClosed,
+        new Promise((_, reject) => {
+          closeTimeout = setTimeout(
+            () => reject(new Error("Rust manager stream stayed open")),
+            3000,
+          );
+        }),
+      ]);
+    } finally {
+      clearTimeout(closeTimeout);
+    }
+  } finally {
+    await app.close();
+    await new Promise((resolve) => manager.close(resolve));
+  }
 });
 
 test("local server restricts API, Origin, Host, static files and WebSocket access", async (t) => {

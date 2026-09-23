@@ -6,7 +6,10 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -20,6 +23,110 @@ SPEC.loader.exec_module(REMOTE)
 
 
 class RemoteSessionTests(unittest.TestCase):
+    def test_window_watcher_handles_only_lifecycle_events(self) -> None:
+        for event_type, expected in [
+            (16, "create"),
+            (17, "destroy"),
+            (18, "unmap"),
+            (19, "map"),
+            (21, "reparent"),
+            (22, None),
+        ]:
+            event = REMOTE.XEvent()
+            event.type = event_type
+            self.assertEqual(REMOTE.window_event_kind(event), expected)
+
+    def test_window_watcher_emits_initial_and_debounced_change_snapshots(self) -> None:
+        read_fd, write_fd = os.pipe()
+        os.close(write_fd)
+        output = StringIO()
+        reads = 0
+        event_pending = True
+        waits = 0
+
+        class FakeX11:
+            def __init__(self, _session: dict) -> None:
+                pass
+
+            def subscribe_window_tree(self) -> None:
+                pass
+
+            def windows(self, **_options: object) -> list[dict]:
+                nonlocal reads
+                reads += 1
+                windows = [
+                    {
+                        "id": "0x1",
+                        "mapped": True,
+                        "depth": 1,
+                        "x": 0,
+                        "y": 0,
+                        "width": 100,
+                        "height": 100,
+                    }
+                ]
+                if reads > 1:
+                    windows.append(
+                        {
+                            "id": "0x2",
+                            "mapped": True,
+                            "depth": 2,
+                            "x": 10,
+                            "y": 20,
+                            "width": 800,
+                            "height": 600,
+                        }
+                    )
+                return windows
+
+            def pending_events(self) -> list[REMOTE.XEvent]:
+                nonlocal event_pending
+                if event_pending:
+                    event_pending = False
+                    event = REMOTE.XEvent()
+                    event.type = 16
+                    return [event]
+                return []
+
+            def close(self) -> None:
+                pass
+
+        def fake_select(
+            readers: list[int], _writers: list, _errors: list, timeout: float
+        ):
+            nonlocal waits
+            waits += 1
+            if waits <= 2:
+                time.sleep(timeout)
+                return [], [], []
+            return readers, [], []
+
+        try:
+            with (
+                mock.patch.object(REMOTE, "X11", FakeX11),
+                mock.patch.object(
+                    REMOTE.sys, "stdin", SimpleNamespace(fileno=lambda: read_fd)
+                ),
+                mock.patch.object(REMOTE.select, "select", side_effect=fake_select),
+                redirect_stdout(output),
+            ):
+                REMOTE.watch_windows(
+                    {
+                        "display": ":0",
+                        "xauthority": "/tmp/xauth",
+                        "mainWindow": "0x1",
+                        "className": "QQ",
+                    }
+                )
+            messages = [json.loads(line) for line in output.getvalue().splitlines()]
+            self.assertEqual(
+                [item["reason"] for item in messages], ["initial", "event"]
+            )
+            self.assertEqual(messages[0]["windows"], [])
+            self.assertEqual(messages[1]["windows"][0]["id"], "0x2")
+        finally:
+            os.close(read_fd)
+
     def test_password_requires_private_regular_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "vnc.pass"
@@ -47,10 +154,10 @@ class RemoteSessionTests(unittest.TestCase):
                 self.assertEqual(REMOTE.select_password_file(""), password)
 
     def test_vp8_payload_type_follows_video_offer(self) -> None:
-        offer = "m=audio 9\n" "a=rtpmap:96 opus/48000\n" "m=video 9\n" "a=rtpmap:107 VP8/90000\n"
+        offer = "m=audio 9\na=rtpmap:96 opus/48000\nm=video 9\na=rtpmap:107 VP8/90000\n"
         self.assertEqual(REMOTE.vp8_payload_type(offer), 107)
         self.assertIsNone(
-            REMOTE.vp8_payload_type("m=video 9\n" "a=rtpmap:107 H264/90000\n")
+            REMOTE.vp8_payload_type("m=video 9\na=rtpmap:107 H264/90000\n")
         )
 
     def test_final_answer_sdp_comes_from_gathered_local_description(self) -> None:
@@ -59,9 +166,7 @@ class RemoteSessionTests(unittest.TestCase):
             "m=video 40000 UDP/TLS/RTP/SAVPF 96\r\n"
             "a=candidate:1 1 UDP 2122260223 192.0.2.1 40000 typ host\r\n"
         )
-        description = SimpleNamespace(
-            sdp=SimpleNamespace(as_text=lambda: gathered_sdp)
-        )
+        description = SimpleNamespace(sdp=SimpleNamespace(as_text=lambda: gathered_sdp))
 
         class FakeWebRTC:
             def get_property(self, name: str) -> object:

@@ -361,6 +361,77 @@ try {
     await page.locator("#disconnect-report-dialog").isVisible(),
     false,
   );
+  const childStartupPage = await browser.newPage();
+  let startupPolls = 0;
+  let startupToken;
+  await childStartupPage.route("**/api/debug**", (route) =>
+    route.fulfill({ json: { ok: true } }),
+  );
+  const paintReportPromise = childStartupPage
+    .waitForRequest(
+      (request) => request.url().includes("/api/debug?session=main"),
+      { timeout: 4000 },
+    )
+    .then((request) => request.postDataJSON());
+  await childStartupPage.route("**/api/session**", async (route) => {
+    const requestUrl = new URL(route.request().url());
+    if (requestUrl.searchParams.get("session") !== "window-2")
+      return route.continue();
+    startupPolls++;
+    startupToken = route.request().headers()["x-pengux11vnc-token"];
+    if (startupPolls < 3)
+      return route.fulfill({
+        status: 404,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "session-not-found" }),
+      });
+    return route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        session: {
+          id: "window-2",
+          child: true,
+          windowId: "0x2",
+          title: "QQ 子窗口",
+        },
+        profile: { id: "fixture", name: "Fixture", viewer: {} },
+      }),
+    });
+  });
+  await childStartupPage.goto(
+    `${app.origin}/child-loading.html?session=window-2&vncScale=0.625&startedAt=${Date.now() - 250}&debug=1#token=${app.token}`,
+  );
+  await childStartupPage.waitForURL(
+    (url) =>
+      url.pathname === "/" &&
+      url.searchParams.get("session") === "window-2" &&
+      url.searchParams.get("vncScale") === "0.625000",
+    { timeout: 4000 },
+  );
+  assert(
+    startupPolls >= 3,
+    "The loading window must wait for session readiness",
+  );
+  assert.equal(
+    startupToken,
+    app.token,
+    "The loading page must authenticate locally",
+  );
+  await childStartupPage.waitForFunction(() =>
+    sessionStorage.getItem("pengux11vnc-token"),
+  );
+  assert.equal(
+    await childStartupPage.evaluate(() =>
+      sessionStorage.getItem("pengux11vnc-token"),
+    ),
+    app.token,
+    "The child viewer must receive the existing local session token",
+  );
+  const paintReport = await paintReportPromise;
+  assert.equal(paintReport.event, "child-window-painted");
+  assert(Number.isFinite(paintReport.details?.elapsedMs));
+  assert.deepEqual(Object.keys(paintReport.details), ["elapsedMs"]);
+  await childStartupPage.close();
   const closingPage = await browser.newPage();
   const closingPageErrors = [];
   closingPage.on("pageerror", (error) => closingPageErrors.push(error.message));

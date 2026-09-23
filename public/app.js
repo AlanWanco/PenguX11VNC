@@ -30,7 +30,12 @@ let resizeObserver;
 let imeOverlay;
 let childTimer;
 let childPollInFlight = false;
-const childPollIntervalMs = 1000;
+const childPollIntervalMs = 15000;
+let childWatchController;
+let childWatchRetryTimer;
+let childWatchRetryResolve;
+let childMonitorEpoch = 0;
+let childSnapshotQueue = Promise.resolve();
 let clipboardTimer;
 let remoteActivationTimer;
 let remoteActivationInFlight = false;
@@ -51,6 +56,13 @@ let sessionReady;
 const queryParameters = new URLSearchParams(location.search);
 const sessionId = queryParameters.get("session") || "main";
 const isMainSession = sessionId === "main";
+const childStartedAtValue = queryParameters.get("startedAt");
+const childStartedAt =
+  childStartedAtValue === null ? Number.NaN : Number(childStartedAtValue);
+const trackChildStartup =
+  !isMainSession &&
+  queryParameters.get("debug") === "1" &&
+  Number.isFinite(childStartedAt);
 const requestedTauriScale = (() => {
   const value = Number(queryParameters.get("vncScale"));
   return Number.isFinite(value) && value > 0 && value <= 1 ? value : undefined;
@@ -1183,7 +1195,7 @@ async function setupTauriFileDrop() {
     });
   }
 }
-async function createTauriChildWindow(info, url, scaleFactor = 1) {
+async function createTauriChildWindow(info, url, scaleFactor = 1, onDestroyed) {
   const WebviewWindow = tauriWebviewWindowClass();
   const label = `qq-child-${info.id.replace(/^0x/i, "").toLowerCase()}`;
   const scale = Number.isFinite(Number(scaleFactor))
@@ -1198,7 +1210,10 @@ async function createTauriChildWindow(info, url, scaleFactor = 1) {
     minHeight: 200,
     resizable: true,
   });
-  await new Promise((resolve, reject) => {
+  const destroyedListener = onDestroyed
+    ? child.once("tauri://destroyed", onDestroyed)
+    : undefined;
+  const created = new Promise((resolve, reject) => {
     let settled = false;
     child.once("tauri://created", () => {
       if (!settled) {
@@ -1213,6 +1228,8 @@ async function createTauriChildWindow(info, url, scaleFactor = 1) {
       }
     });
   });
+  if (destroyedListener) await destroyedListener;
+  await created;
   return child;
 }
 async function cleanupChildEntry(key, entry) {
@@ -1229,6 +1246,7 @@ async function cleanupChildEntry(key, entry) {
       clearTimeout(entry.cleanupRetryTimer);
       entry.cleanupRetryTimer = undefined;
       window.openedChildWindows.delete(key);
+      renderChildWindows(window.lastChildWindows || []);
     }
     return true;
   } catch {
@@ -1271,9 +1289,13 @@ async function closeChildEntry(key, entry) {
 function renderChildWindows(windows) {
   const list = $("child-list");
   list.replaceChildren();
-  const pending = windows.filter(
-    (info) => !window.openedChildWindows?.has(info.id.toLowerCase()),
-  );
+  const pending = windows.filter((info) => {
+    const key = info.id.toLowerCase();
+    return (
+      !window.openedChildWindows?.has(key) &&
+      !window.openingChildWindows?.has(key)
+    );
+  });
   list.hidden = pending.length === 0;
   for (const info of pending) {
     const key = info.id.toLowerCase();
@@ -1285,76 +1307,132 @@ function renderChildWindows(windows) {
     list.append(button);
   }
 }
+function childStartupUrl(info, scaleFactor = 1, startedAt = Date.now()) {
+  const suffix = info.id.replace(/^0x/i, "").toLowerCase();
+  const scale = Number.isFinite(Number(scaleFactor))
+    ? Math.max(0.05, Math.min(1, Number(scaleFactor)))
+    : 1;
+  const url = new URL("./child-loading.html", location.href);
+  url.searchParams.set("session", `window-${suffix}`);
+  url.searchParams.set("vncScale", scale.toFixed(6));
+  url.searchParams.set("startedAt", String(startedAt));
+  if (debugClientEnabled) url.searchParams.set("debug", "1");
+  url.hash = new URLSearchParams({ token: token || "" }).toString();
+  return url.toString();
+}
 async function openChildWindow(info, userInitiated = false) {
   const key = info.id.toLowerCase();
   const tauri = isTauriShell();
   window.openedChildWindows ??= new Map();
-  if (window.openedChildWindows.has(key)) return;
+  window.openingChildWindows ??= new Set();
+  if (window.openedChildWindows.has(key) || window.openingChildWindows.has(key))
+    return;
+  window.openingChildWindows.add(key);
   let child;
   let childSessionId;
-  if (!tauri) {
-    // Chrome requires this synchronous placeholder before the async SSH/API
-    // request. Tauri creates a native WebviewWindow after the request instead.
-    child = window.open("about:blank", `qq-${key}`, childWindowFeatures(info));
-    if (!child) {
-      if (userInitiated)
-        toast("浏览器仍阻止了子窗口，请允许本地页面打开弹出窗口。");
-      return;
-    }
-  }
+  let openPromise;
+  const openingStartedAt = Date.now();
+  const inheritedScale = tauri
+    ? syncMainTauriScaleFromViewport($("screen").querySelector("canvas")) ||
+      tauriVncScaleFactor ||
+      1
+    : 1;
+  const startupUrl = childStartupUrl(info, inheritedScale, openingStartedAt);
+  const suffix = info.id.replace(/^0x/i, "").toLowerCase();
+  const entry = {
+    window: undefined,
+    tauri,
+    closed: false,
+    sessionReady: false,
+    sessionId: `window-${suffix}`,
+    info,
+  };
+  const markClosed = () => {
+    entry.closed = true;
+    entry.closeRequested = false;
+    debugClient("child-destroyed", {
+      key,
+      sessionId: entry.sessionId,
+      windowId: info.id,
+    });
+    refocusMainViewerAfterChildClose();
+    if (entry.sessionReady) void cleanupChildEntry(key, entry);
+  };
   try {
-    const inheritedScale = tauri
-      ? syncMainTauriScaleFromViewport($("screen").querySelector("canvas")) ||
-        tauriVncScaleFactor ||
-        1
-      : 1;
-    const opened = await api(
-      `/api/windows/${encodeURIComponent(info.id)}/open?session=main`,
-      { method: "POST" },
-    );
-    if (!opened.ok) throw new Error("子窗口 VNC 会话启动失败");
-    const data = await opened.json();
-    childSessionId = data.session?.id;
-    let childUrl = data.url;
-    if (tauri && Number.isFinite(inheritedScale)) {
-      const url = new URL(data.url, location.origin);
-      url.searchParams.set("vncScale", inheritedScale.toFixed(6));
-      childUrl = url.toString();
-    }
-    if (tauri)
-      child = await createTauriChildWindow(info, childUrl, inheritedScale);
-    else child.location.href = childUrl;
-    const entry = {
-      window: child,
-      tauri,
-      closed: false,
-      sessionId: data.session.id,
-      info,
-    };
     if (tauri) {
-      const markClosed = () => {
-        entry.closed = true;
-        entry.closeRequested = false;
-        debugClient("child-destroyed", {
-          key,
-          sessionId: entry.sessionId,
-          windowId: info.id,
-        });
-        refocusMainViewerAfterChildClose();
-        void cleanupChildEntry(key, entry);
-      };
-      // Do not register onCloseRequested: Tauri then prevents the OS close
-      // and relies on JS destroy(). Native Rust cleanup already runs off-thread.
-      await child.once("tauri://destroyed", markClosed);
+      // Show a local loading page immediately; remote SSH/VNC setup can take
+      // several seconds, but the child Webview must not wait for it to appear.
+      openPromise = api(
+        `/api/windows/${encodeURIComponent(info.id)}/open?session=main`,
+        { method: "POST" },
+      ).then(async (response) => {
+        if (!response.ok) throw new Error("子窗口 VNC 会话启动失败");
+        const data = await response.json();
+        childSessionId = data.session?.id;
+        return data;
+      });
+      openPromise.catch(() => {});
+      child = await createTauriChildWindow(
+        info,
+        startupUrl,
+        inheritedScale,
+        markClosed,
+      );
+      entry.window = child;
+      debugClient("child-window-created", {
+        elapsedMs: Math.max(0, Date.now() - openingStartedAt),
+      });
+    } else {
+      // Chrome requires this synchronous placeholder before async SSH/API work.
+      child = window.open(
+        "about:blank",
+        `qq-${key}`,
+        childWindowFeatures(info),
+      );
+      if (!child) {
+        if (userInitiated)
+          toast("浏览器仍阻止了子窗口，请允许本地页面打开弹出窗口。");
+        return;
+      }
+      child.location.href = startupUrl;
+      openPromise = api(
+        `/api/windows/${encodeURIComponent(info.id)}/open?session=main`,
+        { method: "POST" },
+      ).then(async (response) => {
+        if (!response.ok) throw new Error("子窗口 VNC 会话启动失败");
+        const data = await response.json();
+        childSessionId = data.session?.id;
+        return data;
+      });
+      openPromise.catch(() => {});
+    }
+
+    const data = await openPromise;
+    childSessionId ||= data.session?.id;
+    if (!childSessionId) throw new Error("子窗口 VNC 会话启动失败");
+    entry.sessionId = childSessionId;
+    entry.sessionReady = true;
+    debugClient("child-session-ready", {
+      elapsedMs: Math.max(0, Date.now() - openingStartedAt),
+    });
+    if (entry.closed) {
+      window.openedChildWindows.set(key, entry);
+      await cleanupChildEntry(key, entry);
+      return;
     }
     window.openedChildWindows.set(key, entry);
     renderChildWindows(window.lastChildWindows || []);
   } catch (error) {
-    if (childSessionId)
-      await api(
-        `/api/sessions/${encodeURIComponent(childSessionId)}?session=main`,
-        { method: "DELETE" },
-      ).catch(() => {});
+    if (!childSessionId && openPromise) {
+      const opened = await openPromise.catch(() => undefined);
+      childSessionId = opened?.session?.id;
+    }
+    if (childSessionId) {
+      entry.sessionId = childSessionId;
+      entry.sessionReady = true;
+      window.openedChildWindows.set(key, entry);
+      await cleanupChildEntry(key, entry).catch(() => {});
+    }
     try {
       if (tauri) await child?.close();
       else child?.close();
@@ -1362,7 +1440,58 @@ async function openChildWindow(info, userInitiated = false) {
       // The child may already have been destroyed.
     }
     toast(error.message || "子窗口 VNC 会话启动失败");
+  } finally {
+    window.openingChildWindows.delete(key);
+    renderChildWindows(window.lastChildWindows || []);
   }
+}
+async function reconcileChildWindows(windows, epoch) {
+  if (!connected || !isMainSession || epoch !== childMonitorEpoch) return;
+  const visibleWindows = windows.filter((info) => info.mapped !== false);
+  window.lastChildWindows = visibleWindows;
+  window.openedChildWindows ??= new Map();
+  const knownKeys = new Set(windows.map((info) => info.id.toLowerCase()));
+  for (const [key, entry] of window.openedChildWindows) {
+    const childClosed =
+      entry.closed === true || (!entry.tauri && entry.window?.closed === true);
+    const remoteClosed = !knownKeys.has(key);
+    if (!childClosed && !remoteClosed) continue;
+    if (childClosed) await cleanupChildEntry(key, entry);
+    else await closeChildEntry(key, entry);
+    if (!connected || epoch !== childMonitorEpoch) return;
+  }
+  $("child-status").textContent = visibleWindows.length
+    ? `发现 ${visibleWindows.length} 个 QQ 子窗口。`
+    : "没有可见的 QQ 子窗口。";
+  renderChildWindows(visibleWindows);
+  if (!settings.autoChildOpen) return;
+  for (const info of visibleWindows) {
+    if (!connected || epoch !== childMonitorEpoch) return;
+    const key = info.id.toLowerCase();
+    if (
+      window.openedChildWindows.has(key) ||
+      window.openingChildWindows?.has(key)
+    )
+      continue;
+    void openChildWindow(info).catch(() => {
+      if (epoch === childMonitorEpoch)
+        $("child-status").textContent = "子窗口启动失败，可从列表重试。";
+    });
+  }
+}
+function queueChildWindowSnapshot(windows, epoch = childMonitorEpoch) {
+  if (!Array.isArray(windows)) return childSnapshotQueue;
+  childSnapshotQueue = childSnapshotQueue
+    .then(() => {
+      if (connected && isMainSession && epoch === childMonitorEpoch)
+        return reconcileChildWindows(windows, epoch);
+    })
+    .catch(() => {
+      if (epoch === childMonitorEpoch)
+        $("child-status").textContent =
+          "子窗口检查暂不可用；主 QQ 连接不受影响。";
+    });
+  return childSnapshotQueue;
 }
 async function pollChildWindows(force = false) {
   if (
@@ -1373,57 +1502,139 @@ async function pollChildWindows(force = false) {
   )
     return;
   childPollInFlight = true;
+  const epoch = childMonitorEpoch;
   try {
     const response = await api("/api/windows?session=main");
     if (!response.ok) throw new Error("子窗口服务不可用");
     const data = await response.json();
-    const windows = data.windows || [];
-    const visibleWindows = windows.filter((info) => info.mapped !== false);
-    window.lastChildWindows = visibleWindows;
-    window.openedChildWindows ??= new Map();
-    const knownKeys = new Set(windows.map((info) => info.id.toLowerCase()));
-    for (const [key, entry] of window.openedChildWindows) {
-      const childClosed =
-        entry.closed === true ||
-        (!entry.tauri && entry.window?.closed === true);
-      const remoteClosed = !knownKeys.has(key);
-      if (!childClosed && !remoteClosed) continue;
-      if (childClosed) await cleanupChildEntry(key, entry);
-      else await closeChildEntry(key, entry);
-    }
-    $("child-status").textContent = visibleWindows.length
-      ? `发现 ${visibleWindows.length} 个 QQ 子窗口。`
-      : "没有可见的 QQ 子窗口。";
-    renderChildWindows(visibleWindows);
-    if (!settings.autoChildOpen) return;
-    for (const info of visibleWindows) {
-      if (window.openedChildWindows.has(info.id.toLowerCase())) continue;
-      await openChildWindow(info);
-    }
+    await queueChildWindowSnapshot(data.windows || [], epoch);
   } catch {
-    $("child-status").textContent = "子窗口检查暂不可用；主 QQ 连接不受影响。";
+    if (connected && epoch === childMonitorEpoch)
+      $("child-status").textContent =
+        "子窗口检查暂不可用；主 QQ 连接不受影响。";
   } finally {
     childPollInFlight = false;
   }
 }
+function childMonitorNeeded() {
+  return settings.autoChildOpen || Boolean(window.openedChildWindows?.size);
+}
+async function consumeChildWindowWatch(response, signal, epoch) {
+  if (!response.body) throw new Error("watch-stream-unavailable");
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let pending = "";
+  let receivedSnapshot = false;
+  const consumeLines = async (text) => {
+    pending += text;
+    if (pending.length > 64 * 1024)
+      throw new Error("window-watch-line-too-large");
+    let newline;
+    while ((newline = pending.indexOf("\n")) >= 0) {
+      const line = pending.slice(0, newline).trim();
+      pending = pending.slice(newline + 1);
+      if (!line) continue;
+      const message = JSON.parse(line);
+      if (message.error) throw new Error("remote-window-watch-failed");
+      if (message.type !== "snapshot" || !Array.isArray(message.windows))
+        continue;
+      if (epoch !== childMonitorEpoch || signal.aborted) return;
+      receivedSnapshot = true;
+      await queueChildWindowSnapshot(message.windows, epoch);
+      if (epoch === childMonitorEpoch && !signal.aborted)
+        $("child-status").dataset.watch = "connected";
+    }
+  };
+  try {
+    while (epoch === childMonitorEpoch && !signal.aborted) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      await consumeLines(decoder.decode(value, { stream: true }));
+    }
+    await consumeLines(decoder.decode());
+    if (pending.trim()) await consumeLines("\n");
+    return receivedSnapshot;
+  } finally {
+    await reader.cancel().catch(() => {});
+    if (epoch === childMonitorEpoch && !signal.aborted)
+      $("child-status").dataset.watch = "reconnecting";
+  }
+}
+async function runChildWindowWatch(epoch) {
+  let retryMs = 1000;
+  while (connected && epoch === childMonitorEpoch && childMonitorNeeded()) {
+    const controller = new AbortController();
+    childWatchController = controller;
+    try {
+      const response = await api("/api/windows/watch?session=main", {
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        await response.body?.cancel().catch(() => {});
+        throw new Error("window-watch-unavailable");
+      }
+      const receivedSnapshot = await consumeChildWindowWatch(
+        response,
+        controller.signal,
+        epoch,
+      );
+      if (receivedSnapshot) retryMs = 1000;
+    } catch {
+      if (!controller.signal.aborted && epoch === childMonitorEpoch)
+        $("child-status").dataset.watch = "reconnecting";
+      retryMs = Math.min(15000, retryMs * 2);
+    } finally {
+      if (childWatchController === controller) childWatchController = undefined;
+    }
+    if (!connected || epoch !== childMonitorEpoch || !childMonitorNeeded())
+      break;
+    await new Promise((resolve) => {
+      const resume = () => {
+        childWatchRetryTimer = undefined;
+        childWatchRetryResolve = undefined;
+        resolve();
+      };
+      childWatchRetryResolve = resume;
+      childWatchRetryTimer = setTimeout(resume, retryMs);
+    });
+    retryMs = Math.min(15000, retryMs * 2);
+  }
+}
+function wakeChildWatchRetry() {
+  clearTimeout(childWatchRetryTimer);
+  childWatchRetryTimer = undefined;
+  const resume = childWatchRetryResolve;
+  childWatchRetryResolve = undefined;
+  resume?.();
+}
 function startChildMonitor() {
+  const epoch = ++childMonitorEpoch;
   clearTimeout(childTimer);
-  if (!isMainSession) return;
+  wakeChildWatchRetry();
+  childWatchController?.abort();
+  childWatchController = undefined;
+  if (!isMainSession || !connected || !childMonitorNeeded()) return;
+  void runChildWindowWatch(epoch);
   const tick = async () => {
-    if (!connected || !isMainSession) return;
+    if (!connected || !isMainSession || epoch !== childMonitorEpoch) return;
     const startedAt = performance.now();
-    await pollChildWindows();
-    if (connected && isMainSession) {
+    if ($("child-status").dataset.watch !== "connected")
+      await pollChildWindows();
+    if (connected && isMainSession && epoch === childMonitorEpoch) {
       const elapsed = performance.now() - startedAt;
       childTimer = setTimeout(tick, Math.max(0, childPollIntervalMs - elapsed));
     }
   };
-  tick();
+  childTimer = setTimeout(tick, childPollIntervalMs);
 }
 function stopChildMonitor() {
+  childMonitorEpoch++;
   clearTimeout(childTimer);
+  wakeChildWatchRetry();
   childTimer = undefined;
-  childPollInFlight = false;
+  childWatchController?.abort();
+  childWatchController = undefined;
+  delete $("child-status").dataset.watch;
 }
 
 function formatFileSize(bytes) {
@@ -1781,6 +1992,10 @@ async function startVideoStream() {
       height: video.videoHeight,
       readyState: video.readyState,
     });
+    if (trackChildStartup)
+      debugClient("child-video-first-frame", {
+        elapsedMs: Math.max(0, Date.now() - childStartedAt),
+      });
     video.hidden = false;
     document.body.classList.remove("video-pending");
     document.body.classList.add("video-active");
@@ -2062,6 +2277,18 @@ async function connect(prepare = true) {
       void clearVncPasswordCache();
       stopMainConnection().catch(() => {});
       toast("VNC 认证失败，已停止自动重试。请检查密码后重新连接。");
+    });
+    let childFirstFrameReported = false;
+    client.addEventListener("firstframe", () => {
+      if (!trackChildStartup || childFirstFrameReported) return;
+      childFirstFrameReported = true;
+      requestAnimationFrame(() =>
+        requestAnimationFrame(() =>
+          debugClient("child-rfb-first-frame", {
+            elapsedMs: Math.max(0, Date.now() - childStartedAt),
+          }),
+        ),
+      );
     });
     client.addEventListener("connect", () => {
       stopChildRecoveryMonitor();

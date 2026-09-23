@@ -159,6 +159,9 @@ export async function testTauriChildren(browser, app, mock) {
   const errors = [];
   const deleted = [];
   let visible = [];
+  let delayedOpenId;
+  let delayedOpenReached = false;
+  let releaseDelayedOpen;
   const readViewerSettings = () =>
     fetch(`${app.origin}/api/settings?session=main`, {
       headers: { "X-PenguX11VNC-Token": app.token },
@@ -175,9 +178,24 @@ export async function testTauriChildren(browser, app, mock) {
   };
   page.on("pageerror", (error) => errors.push(error.message));
   await page.addInitScript(installTauriFixture, capability.permissions);
-  await page.route("**/api/windows**", (route) => {
+  await page.route("**/api/windows**", async (route) => {
     const url = new URL(route.request().url());
+    if (url.pathname.endsWith("/watch"))
+      return route.fulfill({
+        contentType: "application/x-ndjson",
+        body: `${JSON.stringify({
+          type: "snapshot",
+          reason: "initial",
+          windows: visible,
+        })}\n`,
+      });
     const id = url.pathname.match(/^\/api\/windows\/(0x[0-9a-f]+)\/open$/)?.[1];
+    if (id && id === delayedOpenId) {
+      delayedOpenReached = true;
+      await new Promise((resolve) => {
+        releaseDelayedOpen = resolve;
+      });
+    }
     const body = id
       ? {
           session: { id: `window-${id.slice(2)}`, windowId: id, child: true },
@@ -450,14 +468,49 @@ export async function testTauriChildren(browser, app, mock) {
     );
     await page.click("#settings-close");
 
-    // Linux QQ disappears: the main viewer closes the corresponding native window.
+    // The native child window appears while remote VNC setup is still pending.
+    delayedOpenId = "0x2";
+    delayedOpenReached = false;
     visible = [info("0x2")];
+    const openDeadline = Date.now() + 1500;
+    while (!delayedOpenReached && Date.now() < openDeadline)
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    assert(
+      delayedOpenReached,
+      "The child-session request must reach the test gate",
+    );
+    let appearedBeforeSessionReady = false;
+    try {
+      await page.waitForFunction(
+        () =>
+          window.tauriFixture.createdUrls.some(
+            (item) => item.label === "qq-child-2",
+          ) && window.openingChildWindows?.has("0x2"),
+        undefined,
+        { timeout: 1500 },
+      );
+      appearedBeforeSessionReady = true;
+    } catch {
+      // Release the mocked remote operation below before failing the assertion.
+    }
+    releaseDelayedOpen?.();
+    delayedOpenId = undefined;
+    assert(
+      appearedBeforeSessionReady,
+      "The native child window must appear before remote session setup finishes",
+    );
     await waitOpen("0x2");
     const childUrl = await page.evaluate(
       () =>
         window.tauriFixture.createdUrls.find(
           (item) => item.label === "qq-child-2",
         ).url,
+    );
+    assert.equal(new URL(childUrl).pathname, "/child-loading.html");
+    assert.equal(
+      new URL(childUrl).searchParams.get("session"),
+      "window-2",
+      "The early child window must wait for its matching VNC session",
     );
     const currentScale = await page.evaluate(() => {
       const canvas = document.querySelector("canvas");

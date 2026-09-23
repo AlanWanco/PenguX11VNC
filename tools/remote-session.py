@@ -11,6 +11,7 @@ import ctypes.util
 import json
 import os
 import re
+import select
 import selectors
 import shutil
 import signal
@@ -65,6 +66,21 @@ class Attributes(C.Structure):
 
 class ClassHint(C.Structure):
     _fields_ = [("name", C.c_void_p), ("klass", C.c_void_p)]
+
+
+class XEvent(C.Union):
+    # Xlib reserves 24 longs for the largest event structure.
+    _fields_ = [("type", C.c_int), ("pad", C.c_long * 24)]
+
+
+def window_event_kind(event: XEvent) -> str | None:
+    return {
+        16: "create",
+        17: "destroy",
+        18: "unmap",
+        19: "map",
+        21: "reparent",
+    }.get(event.type)
 
 
 def process_identity(pid: int) -> dict | None:
@@ -123,6 +139,10 @@ class X11:
                 C.c_int,
             ),
             "XFlush": ([C.c_void_p], C.c_int),
+            "XSync": ([C.c_void_p, C.c_int], C.c_int),
+            "XSelectInput": ([C.c_void_p, C.c_ulong, C.c_long], C.c_int),
+            "XPending": ([C.c_void_p], C.c_int),
+            "XNextEvent": ([C.c_void_p, C.POINTER(XEvent)], C.c_int),
             "XInternAtom": ([C.c_void_p, C.c_char_p, C.c_int], C.c_ulong),
             "XGetWindowProperty": (
                 [
@@ -210,18 +230,14 @@ class X11:
         if window <= 0:
             raise RuntimeError("invalid-window-id")
         attrs = Attributes()
-        if not self.lib.XGetWindowAttributes(
-            self.display, window, C.byref(attrs)
-        ):
+        if not self.lib.XGetWindowAttributes(self.display, window, C.byref(attrs)):
             raise RuntimeError("window-unavailable")
         hint = ClassHint()
         if not self.lib.XGetClassHint(self.display, window, C.byref(hint)):
             raise RuntimeError("window-class-unavailable")
         try:
             klass = (
-                C.string_at(hint.klass).decode(errors="replace")
-                if hint.klass
-                else ""
+                C.string_at(hint.klass).decode(errors="replace") if hint.klass else ""
             )
         finally:
             if hint.name:
@@ -239,9 +255,7 @@ class X11:
             expected = target.get(key)
             if expected is not None and str(identity.get(key)) != str(expected):
                 raise RuntimeError("window-identity-mismatch")
-        hidden_atom = self.lib.XInternAtom(
-            self.display, b"_NET_WM_STATE_HIDDEN", 0
-        )
+        hidden_atom = self.lib.XInternAtom(self.display, b"_NET_WM_STATE_HIDDEN", 0)
         hidden = hidden_atom in self.property(window, "_NET_WM_STATE")
         return window, attrs, hidden
 
@@ -279,13 +293,21 @@ class X11:
         self.lib.XFlush(self.display)
         return restored
 
-    def windows(self) -> list[dict]:
+    def windows(
+        self,
+        class_name: str = "QQ",
+        min_width: int = 80,
+        min_height: int = 60,
+        require_process_identity: bool = True,
+    ) -> list[dict]:
         root_window = self.lib.XDefaultRootWindow(self.display)
         queue = [(root_window, 0)]
         result = []
         normal = self.lib.XInternAtom(self.display, b"_NET_WM_WINDOW_TYPE_NORMAL", 0)
         visited = set()
-        debug_log("scan-start", root=hex(root_window), display=self.session.get("display"))
+        debug_log(
+            "scan-start", root=hex(root_window), display=self.session.get("display")
+        )
         while queue and len(visited) < 10000 and len(result) < 32:
             window, depth = queue.pop()
             if window in visited:
@@ -311,8 +333,11 @@ class X11:
                         self.lib.XFree(hint.name)
                     if hint.klass:
                         self.lib.XFree(hint.klass)
-                if klass.lower() == "qq" and self.lib.XGetWindowAttributes(
-                    self.display, window, C.byref(attrs)
+                if (
+                    klass.lower() == class_name.lower()
+                    and self.lib.XGetWindowAttributes(
+                        self.display, window, C.byref(attrs)
+                    )
                 ):
                     pids = self.property(window, "_NET_WM_PID")
                     identity = process_identity(pids[0]) if pids else None
@@ -320,12 +345,19 @@ class X11:
                     self.lib.XGetTransientForHint(
                         self.display, window, C.byref(transient)
                     )
-                    if identity and attrs.width >= 80 and attrs.height >= 60:
+                    if (
+                        (identity or not require_process_identity)
+                        and attrs.width >= min_width
+                        and attrs.height >= min_height
+                    ):
                         result.append(
                             {
-                                **identity,
+                                **(identity or {}),
                                 "id": hex(window),
                                 "mapped": attrs.map_state == 2,
+                                "depth": depth,
+                                "x": attrs.x,
+                                "y": attrs.y,
                                 "width": attrs.width,
                                 "height": attrs.height,
                                 "className": klass,
@@ -375,6 +407,46 @@ class X11:
         )
         return result
 
+    def subscribe_window_tree(self) -> None:
+        root_window = self.lib.XDefaultRootWindow(self.display)
+        queue = [root_window]
+        visited = set()
+        event_mask = (1 << 17) | (1 << 19)  # StructureNotify | SubstructureNotify
+        while queue and len(visited) < 10000:
+            window = queue.pop()
+            if window in visited:
+                continue
+            visited.add(window)
+            self.lib.XSelectInput(self.display, window, event_mask)
+            root, parent, children, count = (
+                C.c_ulong(),
+                C.c_ulong(),
+                C.POINTER(C.c_ulong)(),
+                C.c_uint(),
+            )
+            if self.lib.XQueryTree(
+                self.display,
+                window,
+                C.byref(root),
+                C.byref(parent),
+                C.byref(children),
+                C.byref(count),
+            ):
+                queue.extend(children[i] for i in range(min(count.value, 10000)))
+            if children:
+                self.lib.XFree(children)
+        if queue:
+            raise RuntimeError("window-watch-tree-too-large")
+        self.lib.XSync(self.display, 0)
+
+    def pending_events(self) -> list[XEvent]:
+        events = []
+        while self.lib.XPending(self.display) > 0:
+            event = XEvent()
+            self.lib.XNextEvent(self.display, C.byref(event))
+            events.append(event)
+        return events
+
     def close(self) -> None:
         self.lib.XCloseDisplay(self.display)
 
@@ -412,7 +484,9 @@ def helper_directory() -> Path:
         Path.home() / ".local/lib/qq-window-viewer",
     ]
     for candidate in candidates:
-        if any((candidate / name).is_file() for name in ("list-qq-windows", "capture-ime")):
+        if any(
+            (candidate / name).is_file() for name in ("list-qq-windows", "capture-ime")
+        ):
             return candidate
     return candidates[0]
 
@@ -470,6 +544,104 @@ def probe(options: dict) -> dict:
         },
         "imeReady": os.access(helper / "capture-ime", os.X_OK),
     }
+
+
+def watch_windows(options: dict) -> None:
+    display = str(options.get("display") or "")
+    xauthority = str(options.get("xauthority") or "")
+    class_name = str(options.get("className") or "QQ")[:128]
+    main_window = str(options.get("mainWindow") or "")
+    if (
+        not display.startswith(":")
+        or not xauthority
+        or not re.fullmatch(r"0x[0-9a-f]+", main_window, re.IGNORECASE)
+    ):
+        raise RuntimeError("invalid-window-watch-target")
+    min_width = max(40, min(4096, int(options.get("minWidth") or 80)))
+    min_height = max(40, min(4096, int(options.get("minHeight") or 60)))
+    session = {"display": display, "xauthority": xauthority}
+    x11 = X11(session)
+    main_id = int(main_window, 16)
+    last_snapshot = None
+    next_reconcile = time.monotonic() + 15
+    dirty_deadline = None
+    try:
+        x11.subscribe_window_tree()
+
+        def take_snapshot() -> list[dict]:
+            windows = x11.windows(
+                class_name=class_name,
+                min_width=min_width,
+                min_height=min_height,
+                require_process_identity=False,
+            )
+            return sorted(
+                (
+                    {
+                        key: item[key]
+                        for key in (
+                            "id",
+                            "mapped",
+                            "depth",
+                            "x",
+                            "y",
+                            "width",
+                            "height",
+                        )
+                    }
+                    for item in windows
+                    if int(item["id"], 16) != main_id
+                ),
+                key=lambda item: int(item["id"], 16),
+            )
+
+        def send_snapshot(windows: list[dict], reason: str) -> None:
+            print(
+                json.dumps(
+                    {"type": "snapshot", "reason": reason, "windows": windows},
+                    separators=(",", ":"),
+                ),
+                flush=True,
+            )
+
+        last_snapshot = take_snapshot()
+        send_snapshot(last_snapshot, "initial")
+        while True:
+            events = x11.pending_events()
+            changed = False
+            tree_changed = False
+            for event in events:
+                kind = window_event_kind(event)
+                if kind is None:
+                    continue
+                changed = True
+                tree_changed = tree_changed or kind in ("create", "reparent")
+            if tree_changed:
+                x11.subscribe_window_tree()
+            now = time.monotonic()
+            if changed and dirty_deadline is None:
+                dirty_deadline = now + 0.08
+            if dirty_deadline is not None and now >= dirty_deadline:
+                windows = take_snapshot()
+                if windows != last_snapshot:
+                    send_snapshot(windows, "event")
+                    last_snapshot = windows
+                dirty_deadline = None
+            if now >= next_reconcile:
+                x11.subscribe_window_tree()
+                windows = take_snapshot()
+                if windows != last_snapshot:
+                    send_snapshot(windows, "reconcile")
+                    last_snapshot = windows
+                next_reconcile = now + 15
+            timeout = min(0.05, max(0.0, next_reconcile - time.monotonic()))
+            if dirty_deadline is not None:
+                timeout = min(timeout, max(0.0, dirty_deadline - time.monotonic()))
+            readable, _, _ = select.select([sys.stdin.fileno()], [], [], timeout)
+            if readable and not os.read(sys.stdin.fileno(), 4096):
+                return
+    finally:
+        x11.close()
 
 
 def same_window(expected: dict, actual: dict) -> bool:
@@ -722,7 +894,11 @@ def video(options: dict) -> None:
             raise RuntimeError("gstreamer-video-link-failed")
     sink_pad = webrtc.get_request_pad("sink_%u")
     source_pad = rtp_caps.get_static_pad("src")
-    if sink_pad is None or source_pad is None or source_pad.link(sink_pad) != Gst.PadLinkReturn.OK:
+    if (
+        sink_pad is None
+        or source_pad is None
+        or source_pad.link(sink_pad) != Gst.PadLinkReturn.OK
+    ):
         raise RuntimeError("gstreamer-webrtc-link-failed")
 
     loop = GLib.MainLoop()
@@ -861,6 +1037,8 @@ def main() -> None:
             print(json.dumps(activate(options)), flush=True)
         elif action == "serve":
             serve(options)
+        elif action == "watch":
+            watch_windows(options)
         elif action == "video":
             video(options)
         else:

@@ -11,7 +11,7 @@ use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc::{self, Receiver, RecvTimeoutError},
@@ -1458,6 +1458,149 @@ pub fn start_main_tunnel(profile: &Profile) -> io::Result<Option<Child>> {
     Ok(Some(child))
 }
 
+fn spawn_window_watch(profile: &Profile) -> io::Result<(Child, ChildStdin, ChildStdout)> {
+    let options = json!({
+        "display": profile.display(),
+        "xauthority": profile.xauthority(),
+        "mainWindow": profile.window_id(),
+        "className": profile.class_name(),
+        "minWidth": profile.min_width(),
+        "minHeight": profile.min_height(),
+    });
+    let mut args = ssh_args(profile, None, false)?;
+    args.push(onboarding::probe_command("watch", &options));
+    let mut child = hidden_command("ssh")
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let Some(mut stdin) = child.stdin.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(io::Error::other("远端子窗口监控输入通道不可用"));
+    };
+    if let Err(error) = stdin
+        .write_all(&onboarding::probe_stdin())
+        .and_then(|()| stdin.flush())
+    {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(io::Error::other("远端子窗口监控输出通道不可用"));
+    };
+    Ok((child, stdin, stdout))
+}
+
+fn write_http_chunk(stream: &mut TcpStream, bytes: &[u8]) -> io::Result<()> {
+    write!(stream, "{:X}\r\n", bytes.len())?;
+    stream.write_all(bytes)?;
+    stream.write_all(b"\r\n")?;
+    stream.flush()
+}
+
+fn stream_window_watch(mut stream: TcpStream, state: Arc<Mutex<ManagerState>>) {
+    let profile = match state.lock() {
+        Ok(manager) => manager.profile.clone(),
+        Err(_) => return,
+    };
+    let (mut child, _stdin, stdout) = match spawn_window_watch(&profile) {
+        Ok(watch) => watch,
+        Err(error) => {
+            send_json(&mut stream, 500, json!({"error": error.to_string()}));
+            return;
+        }
+    };
+    let mut disconnect_probe = match stream.try_clone() {
+        Ok(probe) => probe,
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return;
+        }
+    };
+    let _ = disconnect_probe.set_read_timeout(Some(Duration::from_millis(200)));
+    let disconnected = Arc::new(AtomicBool::new(false));
+    let monitor_disconnected = Arc::clone(&disconnected);
+    thread::spawn(move || {
+        let mut byte = [0_u8; 1];
+        loop {
+            match disconnect_probe.read(&mut byte) {
+                Ok(0) => {
+                    monitor_disconnected.store(true, Ordering::Relaxed);
+                    break;
+                }
+                Ok(_) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) => {}
+                Err(_) => {
+                    monitor_disconnected.store(true, Ordering::Relaxed);
+                    break;
+                }
+            }
+        }
+    });
+    let (sender, receiver) = mpsc::sync_channel::<Option<Vec<u8>>>(8);
+    thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        loop {
+            let mut line = Vec::new();
+            let read = reader
+                .by_ref()
+                .take(64 * 1024 + 1)
+                .read_until(b'\n', &mut line);
+            match read {
+                Ok(0) => break,
+                Ok(_) if line.len() <= 64 * 1024 => {
+                    if sender.send(Some(line)).is_err() {
+                        return;
+                    }
+                }
+                _ => break,
+            }
+        }
+        let _ = sender.send(None);
+    });
+    if stream
+        .write_all(
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson; charset=utf-8\r\nTransfer-Encoding: chunked\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n\r\n",
+        )
+        .is_err()
+    {
+        let _ = child.kill();
+        let _ = child.wait();
+        return;
+    }
+    loop {
+        if disconnected.load(Ordering::Relaxed) {
+            break;
+        }
+        match receiver.recv_timeout(Duration::from_millis(100)) {
+            Ok(Some(line)) => {
+                if write_http_chunk(&mut stream, &line).is_err() {
+                    break;
+                }
+            }
+            Ok(None) | Err(RecvTimeoutError::Disconnected) => break,
+            Err(RecvTimeoutError::Timeout) => {
+                if child.try_wait().ok().flatten().is_some() {
+                    break;
+                }
+            }
+        }
+    }
+    let _ = stream.write_all(b"0\r\n\r\n");
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 fn discover_windows(profile: &Profile) -> io::Result<Vec<WindowInfo>> {
     if profile.raw["managed"]["enabled"] == true {
         return onboarding::fallback_windows(profile);
@@ -2007,6 +2150,10 @@ fn handle_request(mut stream: TcpStream, state: Arc<Mutex<ManagerState>>, token:
         stream_ime(stream, state);
         return;
     }
+    if method == "GET" && path == "/windows/watch" {
+        stream_window_watch(stream, state);
+        return;
+    }
 
     let result = match (method.as_str(), path.as_str()) {
         ("GET", "/setup") => state
@@ -2219,6 +2366,8 @@ mod onboarding_http_tests {
         let mut manager = ManagerRuntime::start(onboarding::empty_profile(), false, None).unwrap();
         let forbidden = request(&manager, "wrong", "GET", "/setup", "");
         assert!(forbidden.starts_with("HTTP/1.1 403"));
+        let forbidden_watch = request(&manager, "wrong", "GET", "/windows/watch", "");
+        assert!(forbidden_watch.starts_with("HTTP/1.1 403"));
         let setup = request(&manager, &manager.token, "GET", "/setup", "");
         assert!(setup.contains("\"configured\":false"));
         let prepare = request(&manager, &manager.token, "POST", "/main/prepare", "{}");

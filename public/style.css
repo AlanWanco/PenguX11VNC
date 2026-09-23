@@ -944,6 +944,37 @@ body.setup-page {
   max-width: 540px;
   text-align: center;
 }
+.child-startup .welcome-mark {
+  margin-bottom: 22px;
+}
+.child-startup h1 {
+  font-size: 24px;
+  margin: 12px 0 20px;
+}
+.child-startup p {
+  margin: 0 0 10px;
+}
+.child-startup small {
+  color: var(--muted);
+  font-size: 11px;
+}
+.child-startup-spinner {
+  width: 22px;
+  height: 22px;
+  margin-bottom: 18px;
+  border: 2px solid #cbb5f733;
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: child-startup-spin 0.8s linear infinite;
+}
+.child-startup-spinner[hidden] {
+  display: none;
+}
+@keyframes child-startup-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
 @media (max-width: 640px) {
   .setup-grid {
     grid-template-columns: 1fr;

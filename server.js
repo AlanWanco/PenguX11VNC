@@ -3,6 +3,8 @@ import net from "node:net";
 import path from "node:path";
 import { promisify } from "node:util";
 import { execFile, spawn } from "node:child_process";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { randomBytes, timingSafeEqual, createDecipheriv } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { homedir } from "node:os";
@@ -497,6 +499,84 @@ export async function startServer({
     return windows;
   }
 
+  async function streamWindowWatch(req, res) {
+    if (rustManager) {
+      const controller = new AbortController();
+      const abort = () => controller.abort();
+      res.once("close", abort);
+      try {
+        const headers = new Headers({
+          "X-PenguX11VNC-Token": rustManager.token,
+        });
+        const response = await fetch(
+          new URL("/windows/watch", `${rustManager.url}/`),
+          { headers, signal: controller.signal },
+        );
+        if (!response.ok) {
+          const error = await response.json().catch(() => ({}));
+          return json(res, response.status, error);
+        }
+        res.writeHead(200, {
+          "Content-Type": "application/x-ndjson; charset=utf-8",
+          "Cache-Control": "no-store",
+          "X-Content-Type-Options": "nosniff",
+        });
+        await pipeline(Readable.fromWeb(response.body), res);
+      } catch (error) {
+        if (!res.headersSent)
+          json(res, 502, {
+            error: error.message || "window-watch-unavailable",
+          });
+        else if (!res.destroyed) res.destroy();
+      } finally {
+        res.off("close", abort);
+        controller.abort();
+      }
+      return;
+    }
+
+    const [bootstrap, source] = await Promise.all([
+      readFile(path.join(root, "tools/remote-session-bootstrap.py"), "utf8"),
+      readFile(path.join(root, "tools/remote-session.py"), "utf8"),
+    ]);
+    const options = {
+      display: profile.window.display,
+      xauthority: profile.window.xauthority,
+      mainWindow: profile.window.id,
+      className: profile.window.className,
+      minWidth: profile.children.minWidth,
+      minHeight: profile.children.minHeight,
+    };
+    const command = `python3 -c ${shellQuote(bootstrap)} watch ${shellQuote(JSON.stringify(options))}`;
+    const child = spawn("ssh", [...sshArgs(profile), command], {
+      stdio: ["pipe", "pipe", "ignore"],
+      windowsHide: true,
+    });
+    let childClosed = false;
+    const stopChild = () => {
+      if (!childClosed) child.kill();
+    };
+    res.once("close", stopChild);
+    child.once("close", () => {
+      childClosed = true;
+      if (!res.writableEnded) res.end();
+    });
+    child.once("error", (error) => {
+      childClosed = true;
+      if (!res.headersSent)
+        json(res, 502, { error: error.message || "window-watch-unavailable" });
+      else if (!res.writableEnded) res.end();
+    });
+    res.writeHead(200, {
+      "Content-Type": "application/x-ndjson; charset=utf-8",
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+    });
+    child.stdin.on("error", () => {});
+    child.stdout.pipe(res);
+    child.stdin.write(`${Buffer.byteLength(source)}\n${source}`);
+  }
+
   async function findRemotePort() {
     const used = new Set(
       [...sessions.values()]
@@ -846,7 +926,7 @@ export async function startServer({
         return session
           ? json(res, 200, {
               app: "PenguX11VNC",
-              version: "0.1.1",
+              version: "0.2.0",
               profile: profile.id,
               session: publicSession(session),
               clipboardSync: profile.clipboard.sync,
@@ -996,6 +1076,14 @@ export async function startServer({
             body.position,
           ),
         );
+      }
+      if (url.pathname === "/api/windows/watch" && req.method === "GET") {
+        if (sessionId !== "main")
+          return json(res, 400, { error: "children-only-from-main" });
+        if (!canManageRemoteWindows)
+          return json(res, 503, { error: "window-watch-unavailable" });
+        await streamWindowWatch(req, res);
+        return;
       }
       if (url.pathname === "/api/windows" && req.method === "GET") {
         if (sessionId !== "main")

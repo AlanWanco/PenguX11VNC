@@ -142,6 +142,10 @@ export default class QQRFB extends RFB {
 
   _framebufferUpdate() {
     const result = super._framebufferUpdate();
+    if (result && !this._firstFramebufferUpdateReported) {
+      this._firstFramebufferUpdateReported = true;
+      this.dispatchEvent(new Event("firstframe"));
+    }
     if (result) this._frameRequestInFlight = false;
     if (result && this._frameRate !== 0 && !this._videoMode) {
       // The upstream handler immediately requests the next update. Mark this
