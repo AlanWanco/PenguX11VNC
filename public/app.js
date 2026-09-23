@@ -1406,6 +1406,30 @@ async function handleViewerPasteShortcut(event) {
     clipboardPasteShortcutInFlight = false;
   }
 }
+function confirmFileUpload(files, total) {
+  const dialog = $("file-upload-dialog");
+  const summary = $("file-upload-summary");
+  const list = $("file-upload-list");
+  summary.textContent = `将 ${files.length} 个文件（${formatFileSize(total)}）上传到远端 Downloads？`;
+  list.replaceChildren(
+    ...files.map((file) => {
+      const item = document.createElement("li");
+      item.textContent = `${file.name}（${formatFileSize(Number(file.size) || 0)}）`;
+      return item;
+    }),
+  );
+  dialog.returnValue = "";
+  const confirmed = new Promise((resolve) => {
+    dialog.addEventListener(
+      "close",
+      () => resolve(dialog.returnValue === "upload"),
+      { once: true },
+    );
+  });
+  dialog.showModal();
+  return confirmed;
+}
+
 async function sendFiles(loadFiles, uploadCommand, rememberClipboard) {
   if (fileUploadInFlight) return;
   fileUploadInFlight = true;
@@ -1422,11 +1446,7 @@ async function sendFiles(loadFiles, uploadCommand, rememberClipboard) {
         (file) => `${file.name}（${formatFileSize(Number(file.size) || 0)}）`,
       )
       .join("、");
-    if (
-      !window.confirm(
-        `将 ${files.length} 个文件（${formatFileSize(total)}）上传到远端 Downloads？\n\n${summary}\n\n上传后远端 Linux 剪贴板会包含这些文件；不会自动发送 QQ 消息。`,
-      )
-    ) {
+    if (!(await confirmFileUpload(files, total))) {
       status.textContent = "已取消文件上传。";
       return;
     }
@@ -2284,6 +2304,7 @@ function cancelPassword() {
 $("password-cancel").addEventListener("click", cancelPassword);
 $("password-dialog").addEventListener("cancel", cancelPassword);
 $("password-dialog").addEventListener("close", updateMacRemoteShortcuts);
+$("file-upload-dialog").addEventListener("close", updateMacRemoteShortcuts);
 document.addEventListener("keydown", handleViewerPasteShortcut, true);
 $("send-clipboard-files").addEventListener("click", () => {
   if (!connected || settings.viewOnly || !isTauriShell()) return;

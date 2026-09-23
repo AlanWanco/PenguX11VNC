@@ -318,5 +318,28 @@
         </div>
       </form>
     </dialog>
+    <dialog
+      id="file-upload-dialog"
+      class="file-upload-dialog"
+      aria-labelledby="file-upload-title"
+      aria-describedby="file-upload-summary file-upload-note"
+    >
+      <form method="dialog">
+        <span class="eyebrow">FILE TRANSFER</span>
+        <h2 id="file-upload-title">确认上传文件</h2>
+        <p id="file-upload-summary"></p>
+        <ul id="file-upload-list" class="file-upload-list"></ul>
+        <p id="file-upload-note">
+          文件将上传到远端 Downloads，并写入远端 Linux 文件剪贴板；不会自动发送
+          QQ 消息。上传后请在 QQ 中手动粘贴。
+        </p>
+        <div class="dialog-actions">
+          <button id="file-upload-cancel" value="cancel">取消</button>
+          <button id="file-upload-confirm" class="primary" value="upload">
+            确认上传
+          </button>
+        </div>
+      </form>
+    </dialog>
   </body>
 </html>

@@ -691,6 +691,7 @@ footer {
 }
 #toast {
   position: fixed;
+  pointer-events: none;
   bottom: 48px;
   left: 50%;
   transform: translateX(-50%);
@@ -707,12 +708,31 @@ footer {
 }
 dialog {
   border: 1px solid #ffffff20;
-  border-radius: 18px;
+  border-radius: 12px;
   background: #241f2c;
   color: inherit;
   padding: 30px;
   width: 360px;
   box-shadow: 0 24px 100px #0008;
+}
+.file-upload-dialog {
+  width: min(440px, calc(100vw - 32px));
+  max-height: min(80dvh, 640px);
+  overflow: auto;
+}
+.file-upload-list {
+  display: grid;
+  gap: 6px;
+  max-height: 240px;
+  overflow: auto;
+  margin: 12px 0;
+  padding-left: 22px;
+}
+.file-upload-list li {
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
 }
 dialog::backdrop {
   background: #08070baa;
@@ -747,6 +767,10 @@ dialog label {
   justify-content: flex-end;
   gap: 8px;
   margin-top: 8px;
+}
+.dialog-actions button {
+  min-width: 88px;
+  height: 36px;
 }
 body.immersive .titlebar {
   height: 52px;

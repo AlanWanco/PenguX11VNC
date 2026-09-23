@@ -331,12 +331,19 @@ export async function testTauriChildren(browser, app, mock) {
       /没有提供文件路径/,
       "empty native drops must report the missing file path instead of failing silently",
     );
-    page.once("dialog", (dialog) => dialog.accept());
     await page.evaluate(() =>
       window.tauriFixture.emitEvent("tauri://drag-drop", {
         paths: ["/tmp/drop.txt"],
       }),
     );
+    await page.waitForFunction(
+      () => document.querySelector("#file-upload-dialog").open,
+    );
+    assert.match(
+      await page.locator("#file-upload-summary").textContent(),
+      /1 个文件/,
+    );
+    await page.click("#file-upload-confirm");
     await page.waitForFunction(() =>
       window.tauriFixture.invokeCalls.some(
         (call) => call.command === "upload_files",

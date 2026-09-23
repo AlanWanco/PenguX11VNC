@@ -40,6 +40,27 @@ try {
     "关闭窗口",
     "Chrome fallback must not advertise native tray behavior",
   );
+  const fileUploadDialog = page.locator("#file-upload-dialog");
+  assert.equal(await fileUploadDialog.isVisible(), false);
+  await page.evaluate(() =>
+    document.querySelector("#file-upload-dialog").showModal(),
+  );
+  assert.equal(await fileUploadDialog.isVisible(), true);
+  await page.click("#file-upload-cancel");
+  assert.equal(await fileUploadDialog.isVisible(), false);
+  assert.equal(
+    await fileUploadDialog.evaluate((dialog) => dialog.returnValue),
+    "cancel",
+  );
+  await page.evaluate(() =>
+    document.querySelector("#file-upload-dialog").showModal(),
+  );
+  await page.click("#file-upload-confirm");
+  assert.equal(await fileUploadDialog.isVisible(), false);
+  assert.equal(
+    await fileUploadDialog.evaluate((dialog) => dialog.returnValue),
+    "upload",
+  );
   await mkdir(".runtime", { recursive: true, mode: 0o700 });
   await page.screenshot({ path: ".runtime/welcome.png" });
   await page.click("#connect");
@@ -49,6 +70,33 @@ try {
   await page.waitForFunction(
     () => document.querySelector("canvas")?.width === 1669,
   );
+  await page.evaluate(() => {
+    const toast = document.querySelector("#toast");
+    toast.textContent = "文件已上传";
+    toast.hidden = false;
+  });
+  const toastBox = await page.locator("#toast").boundingBox();
+  const toastPoint = {
+    x: toastBox.x + toastBox.width / 2,
+    y: toastBox.y + toastBox.height / 2,
+  };
+  assert.equal(
+    await page.evaluate(
+      ({ x, y }) =>
+        document.elementFromPoint(x, y)?.closest("#screen")?.id || null,
+      toastPoint,
+    ),
+    "screen",
+    "Toast must not intercept pointer hit-testing over the remote screen",
+  );
+  const pointersBeforeToastClick = mock.events.pointers.length;
+  await page.mouse.click(toastPoint.x, toastPoint.y);
+  await page.waitForTimeout(50);
+  assert(
+    mock.events.pointers.length > pointersBeforeToastClick,
+    "Pointer input must pass through the toast to the remote screen",
+  );
+  await page.locator("#toast").evaluate((toast) => (toast.hidden = true));
   assert.equal(
     await page.locator("#send-clipboard-files").isDisabled(),
     true,
