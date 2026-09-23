@@ -818,6 +818,18 @@ function panel(open) {
   if (open) rfb?.blur();
   else if (connected) rfb?.focus();
 }
+async function readSystemClipboardText() {
+  if (isTauriShell()) return tauriInvoke("read_clipboard_text");
+  if (!navigator.clipboard?.readText)
+    throw new Error("当前环境不支持剪贴板读取");
+  return navigator.clipboard.readText();
+}
+async function writeSystemClipboardText(text) {
+  if (isTauriShell()) return tauriInvoke("write_clipboard_text", { text });
+  if (!navigator.clipboard?.writeText)
+    throw new Error("当前环境不支持剪贴板写入");
+  return navigator.clipboard.writeText(text);
+}
 function stopClipboardSync() {
   clearInterval(clipboardTimer);
   clipboardTimer = undefined;
@@ -825,10 +837,9 @@ function stopClipboardSync() {
   remoteClipboardValue = undefined;
 }
 async function pollClipboard() {
-  if (!connected || !settings.clipboardSync || !navigator.clipboard?.readText)
-    return;
+  if (!connected || !settings.clipboardSync) return;
   try {
-    const text = await navigator.clipboard.readText();
+    const text = await readSystemClipboardText();
     if (localClipboardValue === undefined) {
       localClipboardValue = text;
       return;
@@ -842,9 +853,10 @@ async function pollClipboard() {
       localClipboardValue = text;
       $("clipboard-status").textContent = "已将本机剪贴板发送到远端。";
     }
-  } catch {
-    $("clipboard-status").textContent =
-      "浏览器未授予剪贴板权限；点击页面后可重试。";
+  } catch (error) {
+    $("clipboard-status").textContent = isTauriShell()
+      ? `无法读取本机剪贴板：${error?.message || error}`
+      : "浏览器未授予剪贴板权限；点击页面后可重试。";
   }
 }
 async function startClipboardSync() {
@@ -853,11 +865,13 @@ async function startClipboardSync() {
     $("clipboard-status").textContent = "当前关闭：不会读取或写入本机剪贴板。";
     return;
   }
-  if (!navigator.clipboard) {
+  if (!isTauriShell() && !navigator.clipboard) {
     $("clipboard-status").textContent = "当前浏览器不支持剪贴板 API。";
     return;
   }
-  $("clipboard-status").textContent = "同步已开启；正在请求本页剪贴板权限。";
+  $("clipboard-status").textContent = isTauriShell()
+    ? "同步已开启；通过系统剪贴板接口读取本机内容。"
+    : "同步已开启；正在请求本页剪贴板权限。";
   await pollClipboard();
   clipboardTimer = setInterval(pollClipboard, 1200);
 }
@@ -896,9 +910,6 @@ function updateMacRemoteShortcuts() {
   const onScreen = target instanceof Element && !!target.closest("#screen");
   void setMacRemoteShortcuts(onScreen && connected && !settings.viewOnly);
 }
-function isPasswordInput(target) {
-  return target instanceof HTMLInputElement && target.type === "password";
-}
 function activeEditableElement() {
   const target = document.activeElement;
   if (
@@ -928,10 +939,10 @@ function insertTextIntoEditable(target, text) {
 async function handleNativeEditableShortcut(key, target) {
   if (key === "v") {
     try {
-      const text = await navigator.clipboard?.readText?.();
+      const text = await readSystemClipboardText();
       if (typeof text === "string") insertTextIntoEditable(target, text);
-    } catch {
-      toast("无法读取本机文字剪贴板。");
+    } catch (error) {
+      toast(`无法读取本机文字剪贴板：${error?.message || error}`);
     }
     return;
   }
@@ -941,8 +952,13 @@ async function handleNativeEditableShortcut(key, target) {
       target.selectionStart ?? 0,
       target.selectionEnd ?? 0,
     );
-    if (selection && navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(selection).catch(() => {});
+    if (selection) {
+      try {
+        await writeSystemClipboardText(selection);
+      } catch (error) {
+        toast(`无法写入本机文字剪贴板：${error?.message || error}`);
+        return;
+      }
       if (key === "x") {
         const start = target.selectionStart ?? 0;
         const end = target.selectionEnd ?? start;
@@ -979,16 +995,12 @@ async function setupTauriNativeShortcuts() {
       if (!(key === "c" || key === "v" || key === "x")) return;
       const target = activeEditableElement();
       if (target) {
-        // Password entry is always local. Never send a converted Ctrl shortcut
-        // to the remote framebuffer while the VNC password dialog has focus.
-        if (isPasswordInput(target)) {
-          void handleNativeEditableShortcut(key, target);
-          return;
-        }
+        // Native menu shortcuts in all local inputs (especially VNC passwords)
+        // use the host clipboard and never become remote Ctrl shortcuts.
         void handleNativeEditableShortcut(key, target);
         return;
       }
-      if (!connected || settings.viewOnly) return;
+      if (event.payload?.localOnly || !connected || settings.viewOnly) return;
       if (key === "v") void handleViewerPasteShortcut(nativeViewerPasteEvent());
       else rfb?.sendCtrlShortcut?.(key);
     });
@@ -1006,7 +1018,14 @@ async function setupTauriFileDrop() {
   const setDropActive = (active) =>
     document.body.classList.toggle("file-drop-active", active);
   try {
-    await listen("tauri://drag-enter", () => setDropActive(true));
+    await listen("tauri://drag-enter", (event) => {
+      setDropActive(true);
+      debugClient("file-drop-enter", {
+        count: Array.isArray(event.payload?.paths)
+          ? event.payload.paths.length
+          : 0,
+      });
+    });
     await listen("tauri://drag-over", () => setDropActive(true));
     await listen("tauri://drag-leave", () => setDropActive(false));
     await listen("tauri://drag-drop", (event) => {
@@ -1014,7 +1033,19 @@ async function setupTauriFileDrop() {
       const paths = Array.isArray(event.payload?.paths)
         ? event.payload.paths.filter((path) => typeof path === "string")
         : [];
-      if (!paths.length) return;
+      if (!paths.length) {
+        const pasteShortcut = isMacPlatform ? "Cmd+V" : "Ctrl+V";
+        const message = `已收到文件拖放事件，但系统没有提供文件路径；可尝试复制文件后按 ${pasteShortcut}。`;
+        $("clipboard-files-status").textContent = message;
+        toast(message);
+        debugClient("file-drop-empty", {
+          payloadType: typeof event.payload,
+          pathCount: Array.isArray(event.payload?.paths)
+            ? event.payload.paths.length
+            : 0,
+        });
+        return;
+      }
       debugClient("file-drop", { count: paths.length });
       void sendDroppedFiles(paths);
     });
@@ -1928,16 +1959,17 @@ async function connect(prepare = true) {
         toast("连接中断，请检查 SSH 隧道或远端 x11vnc。");
     });
     client.addEventListener("clipboard", async (event) => {
-      if (!settings.clipboardSync || !navigator.clipboard?.writeText) return;
+      if (!settings.clipboardSync) return;
       const text = event.detail?.text || "";
       remoteClipboardValue = text;
       localClipboardValue = text;
       try {
-        await navigator.clipboard.writeText(text);
+        await writeSystemClipboardText(text);
         $("clipboard-status").textContent = "已将远端剪贴板写入本机。";
-      } catch {
-        $("clipboard-status").textContent =
-          "远端剪贴板已到达，但浏览器拒绝写入本机。";
+      } catch (error) {
+        $("clipboard-status").textContent = isTauriShell()
+          ? `远端剪贴板已到达，但系统拒绝写入：${error?.message || error}`
+          : "远端剪贴板已到达，但浏览器拒绝写入本机。";
       }
     });
   } catch (error) {

@@ -171,7 +171,10 @@ fn write_config_to(profile: &Profile, path: &std::path::Path) -> io::Result<()> 
     Ok(())
 }
 
-fn probe_command(action: &str, options: &Value) -> String {
+pub(super) fn probe_command(action: &str, options: &Value) -> String {
+    // Keep the SSH/Windows command line short. Embedding PROBE (currently >31 KB)
+    // with `python3 -c` can exceed CreateProcessW's command-line limit (error 206).
+    let bootstrap = r#"import sys; f=sys.stdin.buffer; n=int(f.readline()); exec(compile(f.read(n), "<pengux11vnc-remote-session>", "exec"))"#;
     format!(
         "{}python3 -c {} {} {}",
         if super::debug_enabled() {
@@ -179,23 +182,30 @@ fn probe_command(action: &str, options: &Value) -> String {
         } else {
             ""
         },
-        shell_quote(PROBE),
+        shell_quote(bootstrap),
         shell_quote(action),
         shell_quote(&options.to_string())
     )
 }
 
+pub(super) fn probe_stdin() -> Vec<u8> {
+    let mut input = format!("{}\n", PROBE.len()).into_bytes();
+    input.extend_from_slice(PROBE.as_bytes());
+    input
+}
+
 pub(super) fn activate_remote(profile: &Profile, target: &Value) -> io::Result<Value> {
-    let output = run_ssh(
+    let output = run_ssh_with_stdin(
         profile,
         &probe_command("activate", &json!({"target": target})),
+        &probe_stdin(),
         Duration::from_secs(7),
     )?;
     serde_json::from_str(&output).map_err(|_| io::Error::other("远端窗口激活响应无效"))
 }
 
 fn probe(profile: &Profile) -> io::Result<Value> {
-    let output = run_ssh(
+    let output = run_ssh_with_stdin(
         profile,
         &probe_command(
             "probe",
@@ -203,6 +213,7 @@ fn probe(profile: &Profile) -> io::Result<Value> {
                 "passwordFile": profile.get("vnc", "remotePasswordFile").and_then(Value::as_str).unwrap_or("")
             }),
         ),
+        &probe_stdin(),
         Duration::from_secs(15),
     )?;
     let report: Value = serde_json::from_str(&output)
@@ -318,6 +329,17 @@ fn spawn_main(profile: &Profile, target: &Value, report: &Value) -> io::Result<L
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()?;
+    if let Some(stdin) = remote.stdin.as_mut() {
+        if let Err(error) = stdin.write_all(&probe_stdin()).and_then(|()| stdin.flush()) {
+            let _ = remote.kill();
+            let _ = remote.wait();
+            return Err(error);
+        }
+    } else {
+        let _ = remote.kill();
+        let _ = remote.wait();
+        return Err(io::Error::other("远端预检脚本输入通道不可用"));
+    }
     let stdout = remote
         .stdout
         .take()
@@ -543,6 +565,20 @@ mod tests {
                "className": "QQ", "instance": "qq", "display": ":0", "xauthority": "/tmp/test-auth",
                "normal": true, "transient": false})
     }
+    #[test]
+    fn remote_probe_script_is_not_embedded_in_the_windows_command_line() {
+        let command = probe_command(
+            "probe",
+            &json!({"passwordFile": "/run/user/1000/x11vnc.pass"}),
+        );
+        assert!(command.len() < 1024);
+        assert!(!command.contains(PROBE));
+        let input = probe_stdin();
+        let header = format!("{}\n", PROBE.len());
+        assert!(input.starts_with(header.as_bytes()));
+        assert_eq!(&input[header.len()..], PROBE.as_bytes());
+    }
+
     #[test]
     fn recovery_never_guesses_largest_window() {
         let old = window("0x10", 10);

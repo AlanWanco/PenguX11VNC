@@ -98,7 +98,7 @@ chmod 600 ~/.config/pengux11vnc/vnc.pass
 
 ### 剪贴板和文件
 
-文本剪贴板默认不会自动同步，可以在设置中开启。Tauri macOS 窗口的 `Cmd+C`/`Cmd+V` 只在远端画布获得焦点时转换为 Linux 的 `Ctrl+C`/`Ctrl+V`；包括连接密码框在内的本地输入框仍保留本机剪贴板行为。
+文本剪贴板默认不会自动同步，可以在设置中开启。Tauri 使用原生系统剪贴板接口，不依赖 WebView 的 `navigator.clipboard`；浏览器回退版使用浏览器剪贴板 API。Tauri macOS 窗口的 `Cmd+C`/`Cmd+V` 只在远端画布获得焦点时转换为 Linux 的 `Ctrl+C`/`Ctrl+V`；包括连接密码框在内的本地输入框仍保留本机剪贴板行为。
 
 发送文件时：
 

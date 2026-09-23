@@ -380,7 +380,12 @@ impl Profile {
                 "SSH 私钥路径必须是本机绝对路径",
             ));
         }
-        let metadata = fs::metadata(&expanded)?;
+        let metadata = fs::metadata(&expanded).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("无法访问 SSH 私钥文件“{expanded}”：{error}"),
+            )
+        })?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1480,23 +1485,23 @@ fn discover_windows(profile: &Profile) -> io::Result<Vec<WindowInfo>> {
 
 fn spawn_video_session(profile: &Profile, options: &Value) -> io::Result<VideoSession> {
     let mut args = ssh_args(profile, None, false)?;
-    let command = format!(
-        "python3 -c {} video {}",
-        shell_quote(onboarding::PROBE),
-        shell_quote(&options.to_string())
-    );
-    args.push(command);
+    args.push(onboarding::probe_command("video", options));
     let mut child = hidden_command("ssh")
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()?;
-    let Some(stdin) = child.stdin.take() else {
+    let Some(mut stdin) = child.stdin.take() else {
         let _ = child.kill();
         let _ = child.wait();
         return Err(io::Error::other("远端视频输入通道不可用"));
     };
+    if let Err(error) = stdin.write_all(&onboarding::probe_stdin()) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
     let Some(stdout) = child.stdout.take() else {
         let _ = child.kill();
         let _ = child.wait();
@@ -1632,14 +1637,56 @@ fn ssh_args(
 }
 
 fn run_ssh(profile: &Profile, command: &str, timeout: Duration) -> io::Result<String> {
+    run_ssh_inner(profile, command, None, timeout)
+}
+
+pub(super) fn run_ssh_with_stdin(
+    profile: &Profile,
+    command: &str,
+    input: &[u8],
+    timeout: Duration,
+) -> io::Result<String> {
+    run_ssh_inner(profile, command, Some(input), timeout)
+}
+
+fn run_ssh_inner(
+    profile: &Profile,
+    command: &str,
+    input: Option<&[u8]>,
+    timeout: Duration,
+) -> io::Result<String> {
     let mut args = ssh_args(profile, None, false)?;
     args.push(command.to_string());
     let mut child = hidden_command("ssh")
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .stdin(Stdio::null())
-        .spawn()?;
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .spawn()
+        .map_err(|error| {
+            if input.is_some() {
+                io::Error::new(
+                    error.kind(),
+                    format!(
+                        "启动 SSH 预检进程失败（远程命令 {} 字符）：{error}",
+                        command.len()
+                    ),
+                )
+            } else {
+                error
+            }
+        })?;
+    if let Some(input) = input {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| io::Error::other("SSH stdin unavailable"))?;
+        stdin.write_all(input)?;
+    }
     let stdout = child
         .stdout
         .take()

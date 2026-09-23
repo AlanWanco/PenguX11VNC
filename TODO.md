@@ -41,6 +41,8 @@
 - [ ] 未连接时调整窗口大小后，连接时按当前窗口可用宽高选择更小的等比缩放，不自动恢复到 1:1
 - [ ] 修复开启子窗口后偶发的鼠标坐标映射错误，核对 framebuffer、canvas 显示尺寸、DPI 和 Tauri 原生窗口尺寸变化
 - [x] Tauri 显式文件剪贴板上传：50 MiB 限制、SCP、远端 Downloads 与 `text/uri-list`
+- [x] Tauri 文本剪贴板同步改用系统原生读写接口，不依赖 WebView 剪贴板 API 权限
+- [ ] macOS 实机确认系统剪贴板访问授权、Finder 文件复制与原生拖放事件
 
 - [x] GitHub Actions 未签名调试打包：macOS arm64 DMG、Linux amd64/arm64 AppImage、Windows amd64/arm64 NSIS 安装包
 - [ ] Release 签名、自动更新与版本回滚

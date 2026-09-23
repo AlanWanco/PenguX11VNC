@@ -50,14 +50,15 @@ struct MacShortcutMenus {
 }
 
 #[cfg(target_os = "macos")]
-fn install_macos_remote_menu(
+fn replace_macos_edit_menu(
     app: &AppHandle,
-) -> Result<MacShortcutMenus, Box<dyn std::error::Error>> {
-    use tauri::menu::{Menu, MenuItemBuilder, PredefinedMenuItem, Submenu};
+    menu: &tauri::menu::Menu<tauri::Wry>,
+    id_prefix: &str,
+    remote: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use tauri::menu::{MenuItemBuilder, PredefinedMenuItem, Submenu};
 
-    let native = Menu::default(app)?;
-    let remote = Menu::default(app)?;
-    let items = remote.items()?;
+    let items = menu.items()?;
     let Some((edit_index, edit_item)) = items.iter().enumerate().find(|(_, item)| {
         item.as_submenu()
             .and_then(|submenu| submenu.text().ok())
@@ -66,20 +67,21 @@ fn install_macos_remote_menu(
     }) else {
         return Err("macOS 默认菜单中缺少 Edit 子菜单".into());
     };
-    remote.remove(edit_item)?;
+    menu.remove(edit_item)?;
 
-    let copy = MenuItemBuilder::with_id("pengux-native-copy", "复制到远端")
+    let suffix = if remote { "到远端" } else { "" };
+    let copy = MenuItemBuilder::with_id(format!("{id_prefix}-copy"), format!("复制{suffix}"))
         .accelerator("CmdOrCtrl+KeyC")
         .build(app)?;
-    let cut = MenuItemBuilder::with_id("pengux-native-cut", "剪切到远端")
+    let cut = MenuItemBuilder::with_id(format!("{id_prefix}-cut"), format!("剪切{suffix}"))
         .accelerator("CmdOrCtrl+KeyX")
         .build(app)?;
-    let paste = MenuItemBuilder::with_id("pengux-native-paste", "粘贴到远端")
+    let paste = MenuItemBuilder::with_id(format!("{id_prefix}-paste"), format!("粘贴{suffix}"))
         .accelerator("CmdOrCtrl+KeyV")
         .build(app)?;
     let edit = Submenu::with_id_and_items(
         app,
-        "pengux11vnc-edit",
+        format!("{id_prefix}-edit"),
         "Edit",
         true,
         &[
@@ -92,7 +94,20 @@ fn install_macos_remote_menu(
             &PredefinedMenuItem::select_all(app, None)?,
         ],
     )?;
-    remote.insert(&edit, edit_index)?;
+    menu.insert(&edit, edit_index)?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn install_macos_remote_menu(
+    app: &AppHandle,
+) -> Result<MacShortcutMenus, Box<dyn std::error::Error>> {
+    use tauri::menu::Menu;
+
+    let native = Menu::default(app)?;
+    replace_macos_edit_menu(app, &native, "pengux-local", false)?;
+    let remote = Menu::default(app)?;
+    replace_macos_edit_menu(app, &remote, "pengux-native", true)?;
     app.set_menu(native.clone())?;
     Ok(MacShortcutMenus { native, remote })
 }
@@ -120,7 +135,7 @@ fn set_macos_remote_shortcuts(_app: AppHandle, _enabled: bool) -> Result<(), Str
 }
 
 #[cfg(target_os = "macos")]
-fn emit_macos_remote_shortcut(app: &AppHandle, key: &str) {
+fn emit_macos_remote_shortcut(app: &AppHandle, key: &str, local_only: bool) {
     let Some(window) = app
         .webview_windows()
         .into_values()
@@ -128,7 +143,10 @@ fn emit_macos_remote_shortcut(app: &AppHandle, key: &str) {
     else {
         return;
     };
-    let _ = window.emit("pengux11vnc://native-shortcut", json!({ "key": key }));
+    let _ = window.emit(
+        "pengux11vnc://native-shortcut",
+        json!({ "key": key, "localOnly": local_only }),
+    );
 }
 
 #[derive(serde::Serialize)]
@@ -173,11 +191,27 @@ fn set_main_window_aspect(app: AppHandle, width: f64, height: f64) -> Result<(),
 
 fn read_local_clipboard_paths() -> Result<Vec<std::path::PathBuf>, String> {
     let mut clipboard =
-        arboard::Clipboard::new().map_err(|error| format!("无法读取本机剪贴板：{error}"))?;
+        arboard::Clipboard::new().map_err(|error| format!("无法读取本机文件剪贴板：{error}"))?;
     clipboard
         .get()
         .file_list()
         .map_err(|error| format!("本机剪贴板中没有可用文件：{error}"))
+}
+
+fn read_local_clipboard_text() -> Result<String, String> {
+    let mut clipboard =
+        arboard::Clipboard::new().map_err(|error| format!("无法读取本机文字剪贴板：{error}"))?;
+    clipboard
+        .get_text()
+        .map_err(|error| format!("无法读取本机文字剪贴板：{error}"))
+}
+
+fn write_local_clipboard_text(text: String) -> Result<(), String> {
+    let mut clipboard =
+        arboard::Clipboard::new().map_err(|error| format!("无法写入本机文字剪贴板：{error}"))?;
+    clipboard
+        .set_text(text)
+        .map_err(|error| format!("无法写入本机文字剪贴板：{error}"))
 }
 
 fn clipboard_file_signature(
@@ -216,6 +250,20 @@ fn preview_files(paths: Vec<std::path::PathBuf>) -> Result<Vec<ClipboardFilePrev
 #[tauri::command]
 fn read_clipboard_files() -> Result<Vec<ClipboardFilePreview>, String> {
     preview_files(read_local_clipboard_paths()?)
+}
+
+#[tauri::command]
+async fn read_clipboard_text() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(read_local_clipboard_text)
+        .await
+        .map_err(|error| format!("本机剪贴板读取任务失败：{error}"))?
+}
+
+#[tauri::command]
+async fn write_clipboard_text(text: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || write_local_clipboard_text(text))
+        .await
+        .map_err(|error| format!("本机剪贴板写入任务失败：{error}"))?
 }
 
 #[tauri::command]
@@ -844,6 +892,8 @@ pub fn run() {
             set_main_window_aspect,
             set_macos_remote_shortcuts,
             read_clipboard_files,
+            read_clipboard_text,
+            write_clipboard_text,
             inspect_files,
             upload_clipboard_files,
             upload_files
@@ -885,6 +935,7 @@ pub fn run() {
                 window_geometry_path,
             });
             if let Err(error) = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
+                .enable_clipboard_access()
                 .title("PenguX11VNC")
                 .inner_size(window_width, window_height)
                 .min_inner_size(320.0, 200.0)
@@ -907,9 +958,12 @@ pub fn run() {
         .on_menu_event(|app, event| {
             #[cfg(target_os = "macos")]
             match event.id().as_ref() {
-                "pengux-native-copy" => emit_macos_remote_shortcut(app, "c"),
-                "pengux-native-cut" => emit_macos_remote_shortcut(app, "x"),
-                "pengux-native-paste" => emit_macos_remote_shortcut(app, "v"),
+                "pengux-local-copy" => emit_macos_remote_shortcut(app, "c", true),
+                "pengux-local-cut" => emit_macos_remote_shortcut(app, "x", true),
+                "pengux-local-paste" => emit_macos_remote_shortcut(app, "v", true),
+                "pengux-native-copy" => emit_macos_remote_shortcut(app, "c", false),
+                "pengux-native-cut" => emit_macos_remote_shortcut(app, "x", false),
+                "pengux-native-paste" => emit_macos_remote_shortcut(app, "v", false),
                 _ => {}
             }
             #[cfg(not(target_os = "macos"))]

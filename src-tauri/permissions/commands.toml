@@ -11,6 +11,16 @@ description = "允许仅在远端画布聚焦时切换 macOS 远端快捷键菜�
 commands.allow = ["set_macos_remote_shortcuts"]
 
 [[permission]]
+identifier = "allow-read-clipboard-text"
+description = "允许在用户启用剪贴板同步或主动粘贴时读取本机文字剪贴板。"
+commands.allow = ["read_clipboard_text"]
+
+[[permission]]
+identifier = "allow-write-clipboard-text"
+description = "允许在用户启用剪贴板同步时写入本机文字剪贴板。"
+commands.allow = ["write_clipboard_text"]
+
+[[permission]]
 identifier = "allow-read-clipboard-files"
 description = "允许读取用户主动选择的本机文件剪贴板预览。"
 commands.allow = ["read_clipboard_files"]

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """SSH-only probe/supervisor. Never reads window titles, pixels or clipboard.
 
-The desktop embeds this file and runs it with python3 -c; no installation is
-needed. probe is read-only. serve requires explicit client consent and owns only
-its newly spawned x11vnc. Closing SSH stdin terminates that child.
+The desktop sends this file over SSH stdin to a small python3 bootstrap; no
+installation is needed. probe is read-only. serve requires explicit client
+consent and owns only its newly spawned x11vnc. Closing SSH stdin terminates that child.
 """
 
 import ctypes as C

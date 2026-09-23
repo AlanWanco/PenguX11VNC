@@ -113,6 +113,14 @@ export async function startMock() {
     events,
     width,
     height,
+    sendClipboard(text) {
+      const payload = Buffer.from(String(text), "utf8");
+      const header = Buffer.alloc(8);
+      header[0] = 3;
+      header.writeUInt32BE(payload.length, 4);
+      for (const client of clients)
+        if (!client.destroyed) client.write(Buffer.concat([header, payload]));
+    },
     async close() {
       for (const client of clients) client.destroy();
       await new Promise((resolve) => server.close(resolve));

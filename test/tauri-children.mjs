@@ -18,6 +18,8 @@ function installTauriFixture(permissions) {
     decorationCalls: [],
     dragCalls: 0,
     invokeCalls: [],
+    clipboardText: "fixture local text",
+    clipboardWrites: [],
     createdUrls: [],
     eventListeners: new Map(),
   };
@@ -115,6 +117,13 @@ function installTauriFixture(permissions) {
         fixture.invokeCalls.push({ command, args });
         if (command === "read_clipboard_files")
           throw new Error("本机剪贴板中没有可用文件");
+        if (command === "read_clipboard_text")
+          return window.tauriFixture.clipboardText;
+        if (command === "write_clipboard_text") {
+          window.tauriFixture.clipboardText = args.text;
+          window.tauriFixture.clipboardWrites.push(args.text);
+          return undefined;
+        }
         if (command === "inspect_files")
           return [{ path: args.paths[0], name: "drop.txt", size: 5 }];
         if (command === "upload_files")
@@ -144,6 +153,8 @@ export async function testTauriChildren(browser, app, mock) {
     ),
   );
   assert(capability.permissions.includes("core:window:allow-close"));
+  assert(capability.permissions.includes("allow-read-clipboard-text"));
+  assert(capability.permissions.includes("allow-write-clipboard-text"));
   const page = await browser.newPage();
   const errors = [];
   const deleted = [];
@@ -225,7 +236,33 @@ export async function testTauriChildren(browser, app, mock) {
     await page.click("#settings-toggle");
     if (await page.locator("#view-only").isChecked())
       await page.uncheck("#view-only");
+    if (!(await page.locator("#clipboard-sync").isChecked()))
+      await page.check("#clipboard-sync");
+    await page.waitForFunction(() =>
+      window.tauriFixture.invokeCalls.some(
+        (call) => call.command === "read_clipboard_text",
+      ),
+    );
+    assert.match(
+      await page.locator("#clipboard-status").textContent(),
+      /通过系统剪贴板接口/,
+      "Tauri should report using the native clipboard bridge",
+    );
     await page.click("#settings-close");
+    mock.sendClipboard("remote clipboard fixture");
+    await page.waitForFunction(() =>
+      window.tauriFixture.clipboardWrites.includes("remote clipboard fixture"),
+    );
+    assert(
+      await page.evaluate(() =>
+        window.tauriFixture.invokeCalls.some(
+          (call) =>
+            call.command === "write_clipboard_text" &&
+            call.args.text === "remote clipboard fixture",
+        ),
+      ),
+      "remote RFB clipboard text must be written with the native Tauri command",
+    );
     const beforeNativeCopy = mock.events.keys.length;
     await page.evaluate(() =>
       window.tauriFixture.emitEvent("pengux11vnc://native-shortcut", {
@@ -269,14 +306,30 @@ export async function testTauriChildren(browser, app, mock) {
       document.querySelector("#password").focus();
       await window.tauriFixture.emitEvent("pengux11vnc://native-shortcut", {
         key: "v",
+        localOnly: true,
       });
-      dialog.close();
     });
-    await page.waitForTimeout(80);
+    await page.waitForFunction(
+      () =>
+        document.querySelector("#password").value ===
+        "remote clipboard fixture",
+    );
     assert.equal(
       mock.events.keys.length,
       beforePasswordShortcut,
-      "password entry must keep Cmd+V local and must not send remote Ctrl+V",
+      "password entry must paste locally without sending remote Ctrl+V",
+    );
+    await page.evaluate(() => {
+      document.querySelector("#password").value = "";
+      document.querySelector("#password-dialog").close();
+    });
+    await page.evaluate(() =>
+      window.tauriFixture.emitEvent("tauri://drag-drop", { paths: [] }),
+    );
+    assert.match(
+      await page.locator("#clipboard-files-status").textContent(),
+      /没有提供文件路径/,
+      "empty native drops must report the missing file path instead of failing silently",
     );
     page.once("dialog", (dialog) => dialog.accept());
     await page.evaluate(() =>
