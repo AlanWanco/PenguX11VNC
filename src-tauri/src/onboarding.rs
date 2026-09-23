@@ -3,6 +3,7 @@ use super::*;
 use std::fs::OpenOptions;
 
 pub(super) const PROBE: &str = include_str!("../../tools/remote-session.py");
+pub(super) const PROBE_BOOTSTRAP: &str = include_str!("../../tools/remote-session-bootstrap.py");
 
 pub(super) struct Onboarding {
     pub configured: bool,
@@ -174,7 +175,6 @@ fn write_config_to(profile: &Profile, path: &std::path::Path) -> io::Result<()> 
 pub(super) fn probe_command(action: &str, options: &Value) -> String {
     // Keep the SSH/Windows command line short. Embedding PROBE (currently >31 KB)
     // with `python3 -c` can exceed CreateProcessW's command-line limit (error 206).
-    let bootstrap = r#"import sys; f=sys.stdin.buffer; n=int(f.readline()); exec(compile(f.read(n), "<pengux11vnc-remote-session>", "exec"))"#;
     format!(
         "{}python3 -c {} {} {}",
         if super::debug_enabled() {
@@ -182,7 +182,7 @@ pub(super) fn probe_command(action: &str, options: &Value) -> String {
         } else {
             ""
         },
-        shell_quote(bootstrap),
+        shell_quote(PROBE_BOOTSTRAP),
         shell_quote(action),
         shell_quote(&options.to_string())
     )
@@ -572,6 +572,7 @@ mod tests {
             &json!({"passwordFile": "/run/user/1000/x11vnc.pass"}),
         );
         assert!(command.len() < 1024);
+        assert!(command.contains("os.read"));
         assert!(!command.contains(PROBE));
         let input = probe_stdin();
         let header = format!("{}\n", PROBE.len());

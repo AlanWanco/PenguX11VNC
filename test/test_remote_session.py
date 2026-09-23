@@ -52,6 +52,44 @@ class RemoteSessionTests(unittest.TestCase):
             REMOTE.vp8_payload_type("m=video 9\n" "a=rtpmap:107 H264/90000\n")
         )
 
+    def test_bootstrap_does_not_buffer_followup_control_input(self) -> None:
+        bootstrap = (ROOT / "tools/remote-session-bootstrap.py").read_text()
+        control = b'{"action":"offer"}\n'
+        script = (
+            b"import os, selectors, sys\n"
+            b"selector = selectors.DefaultSelector()\n"
+            b"selector.register(sys.stdin.fileno(), selectors.EVENT_READ)\n"
+            b"ready = selector.select(3)\n"
+            b"print(os.read(sys.stdin.fileno(), 4096).decode().strip() if ready else 'timeout', flush=True)\n"
+        )
+        payload = f"{len(script)}\n".encode() + script + control
+        process = subprocess.Popen(
+            [sys.executable, "-c", bootstrap],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            assert process.stdin is not None
+            assert process.stdout is not None
+            process.stdin.write(payload)
+            process.stdin.flush()
+            import select
+
+            readable, _, _ = select.select([process.stdout], [], [], 5)
+            self.assertTrue(readable, "bootstrap consumed the buffered control line")
+            self.assertEqual(process.stdout.readline().strip(), control.strip())
+            process.stdin.close()
+            self.assertEqual(process.wait(timeout=5), 0)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
+            if process.stdout:
+                process.stdout.close()
+            if process.stderr:
+                process.stderr.close()
+
     def test_recycled_xid_is_not_same_window(self) -> None:
         target = {
             "id": "0x10",
