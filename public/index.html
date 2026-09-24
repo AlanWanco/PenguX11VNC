@@ -215,11 +215,22 @@
         </section>
         <section class="setting-section">
           <label class="toggle-row" for="clipboard-sync"
-            ><span>双向剪贴板同步<small>仅在开启后读写本机剪贴板</small></span
+            ><span
+              >双向剪贴板同步<small
+                >文字 + PNG 图片；图片仅限 Tauri，单张最大 50 MiB</small
+              ></span
             ><input id="clipboard-sync" type="checkbox" role="switch"
           /></label>
           <p id="clipboard-status" class="help">
             当前关闭：不会读取或写入本机剪贴板。
+          </p>
+          <p
+            id="clipboard-image-status"
+            class="help"
+            role="status"
+            aria-live="polite"
+          >
+            当前关闭：不会读取或写入图片剪贴板。
           </p>
         </section>
         <section class="setting-section">

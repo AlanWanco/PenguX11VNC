@@ -1,3 +1,4 @@
+mod clipboard_image;
 mod manager;
 mod tray;
 
@@ -13,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Mutex,
+    Arc, Mutex,
 };
 #[cfg(target_os = "windows")]
 use std::sync::{
@@ -22,10 +23,9 @@ use std::sync::{
 };
 use std::thread;
 use std::time::Duration;
-#[cfg(target_os = "macos")]
-use tauri::Emitter;
 use tauri::{
-    AppHandle, Manager, PhysicalSize, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent,
+    AppHandle, Emitter, Manager, PhysicalSize, RunEvent, WebviewUrl, WebviewWindowBuilder,
+    WindowEvent,
 };
 use url::Url;
 
@@ -264,6 +264,38 @@ async fn write_clipboard_text(text: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || write_local_clipboard_text(text))
         .await
         .map_err(|error| format!("本机剪贴板写入任务失败：{error}"))?
+}
+
+#[tauri::command]
+async fn configure_clipboard_image_sync(
+    app: AppHandle,
+    enabled: bool,
+    allow_send: bool,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app
+            .try_state::<RuntimeState>()
+            .ok_or_else(|| "本地连接管理器尚未启动".to_string())?;
+        let manager = state
+            .manager
+            .lock()
+            .map_err(|_| "本地连接管理器不可用".to_string())?;
+        let manager = manager
+            .as_ref()
+            .ok_or_else(|| "本地连接管理器已停止".to_string())?;
+        let status_app = app.clone();
+        manager
+            .configure_clipboard_image_sync(
+                enabled,
+                allow_send,
+                Arc::new(move |status| {
+                    let _ = status_app.emit("pengux11vnc://clipboard-image-status", status);
+                }),
+            )
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("图片剪贴板同步任务失败：{error}"))?
 }
 
 #[tauri::command]
@@ -894,6 +926,7 @@ pub fn run() {
             read_clipboard_files,
             read_clipboard_text,
             write_clipboard_text,
+            configure_clipboard_image_sync,
             inspect_files,
             upload_clipboard_files,
             upload_files

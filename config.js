@@ -172,7 +172,8 @@ export function normalizeConnection(raw = {}, id = "connection") {
       frameRate: [0, 5, 10, 15, 24, 30, 60].includes(Number(viewer.frameRate))
         ? Number(viewer.frameRate)
         : 30,
-      clipboardSync: viewer.clipboardSync === true,
+      clipboardSync:
+        viewer.clipboardSync === true || viewer.clipboardImageSync === true,
       autoChildOpen: viewer.autoChildOpen !== false,
       systemTitlebar: viewer.systemTitlebar !== false,
       connectionMode:

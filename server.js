@@ -83,7 +83,8 @@ function normalizeViewerSettings(value = {}) {
     frameRate: [0, 5, 10, 15, 24, 30, 60].includes(Number(value.frameRate))
       ? Number(value.frameRate)
       : 30,
-    clipboardSync: value.clipboardSync === true,
+    clipboardSync:
+      value.clipboardSync === true || value.clipboardImageSync === true,
     autoChildOpen: value.autoChildOpen !== false,
     systemTitlebar: value.systemTitlebar !== false,
     connectionMode:

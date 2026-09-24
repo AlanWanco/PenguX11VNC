@@ -74,7 +74,8 @@ test("connection profiles validate ports, window IDs and viewer defaults", () =>
         wheel: 12,
         bitrate: "low",
         frameRate: 15,
-        clipboardSync: true,
+        clipboardSync: false,
+        clipboardImageSync: true,
         autoOpen: false,
       },
     }),
@@ -85,6 +86,7 @@ test("connection profiles validate ports, window IDs and viewer defaults", () =>
   assert.equal(profile.viewer.bitrate, "low");
   assert.equal(profile.viewer.frameRate, 15);
   assert.equal(profile.viewer.clipboardSync, true);
+  assert.equal(Object.hasOwn(profile.viewer, "clipboardImageSync"), false);
   assert.throws(() =>
     connectionFromJson(
       JSON.stringify({ id: "bad", window: { id: "not-an-xid" } }),
@@ -113,6 +115,7 @@ test("viewer settings persist for the main session", async (t) => {
         bitrate: "low",
         frameRate: 15,
         vncScale: 0.61,
+        clipboardImageSync: true,
       },
     }),
   });
@@ -128,7 +131,7 @@ test("viewer settings persist for the main session", async (t) => {
     vncScale: 0.61,
     bitrate: "low",
     frameRate: 15,
-    clipboardSync: false,
+    clipboardSync: true,
     autoChildOpen: true,
     systemTitlebar: true,
     connectionMode: "vnc",

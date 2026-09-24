@@ -155,6 +155,9 @@ export async function testTauriChildren(browser, app, mock) {
   assert(capability.permissions.includes("core:window:allow-close"));
   assert(capability.permissions.includes("allow-read-clipboard-text"));
   assert(capability.permissions.includes("allow-write-clipboard-text"));
+  assert(
+    capability.permissions.includes("allow-configure-clipboard-image-sync"),
+  );
   const page = await browser.newPage();
   const errors = [];
   const deleted = [];
@@ -233,6 +236,7 @@ export async function testTauriChildren(browser, app, mock) {
     await page.waitForFunction(
       () => !document.querySelector("#connection-mode").disabled,
     );
+    assert.equal(await page.locator("#clipboard-sync").isChecked(), false);
     await page.selectOption("#connection-mode", "video");
     assert.equal(
       await page.locator("#connection-mode option:checked").textContent(),
@@ -286,8 +290,53 @@ export async function testTauriChildren(browser, app, mock) {
     await page.click("#settings-toggle");
     if (await page.locator("#view-only").isChecked())
       await page.uncheck("#view-only");
-    if (!(await page.locator("#clipboard-sync").isChecked()))
-      await page.check("#clipboard-sync");
+    await page.check("#clipboard-sync");
+    await page.waitForFunction(() =>
+      window.tauriFixture.invokeCalls.some(
+        (call) =>
+          call.command === "configure_clipboard_image_sync" &&
+          call.args.enabled === true &&
+          call.args.allowSend === true,
+      ),
+    );
+    assert.match(
+      await page.locator("#clipboard-image-status").textContent(),
+      /已开启/,
+    );
+    await page.waitForFunction(() =>
+      window.tauriFixture.eventListeners.has(
+        "pengux11vnc://clipboard-image-status",
+      ),
+    );
+    await page.evaluate(() =>
+      window.tauriFixture.emitEvent(
+        "pengux11vnc://clipboard-image-status",
+        "received",
+      ),
+    );
+    assert.match(
+      await page.locator("#clipboard-image-status").textContent(),
+      /远端图片写入本机剪贴板/,
+    );
+    await page.check("#view-only");
+    await page.waitForFunction(() =>
+      window.tauriFixture.invokeCalls.some(
+        (call) =>
+          call.command === "configure_clipboard_image_sync" &&
+          call.args.enabled === true &&
+          call.args.allowSend === false,
+      ),
+    );
+    await page.uncheck("#view-only");
+    await page.waitForFunction(() => {
+      const calls = window.tauriFixture.invokeCalls.filter(
+        (call) => call.command === "configure_clipboard_image_sync",
+      );
+      return (
+        calls.at(-1)?.args.enabled === true &&
+        calls.at(-1)?.args.allowSend === true
+      );
+    });
     await page.waitForFunction(() =>
       window.tauriFixture.invokeCalls.some(
         (call) => call.command === "read_clipboard_text",
@@ -626,6 +675,12 @@ export async function testTauriChildren(browser, app, mock) {
     });
     await page.click("#disconnect");
     await waitClosed();
+    await page.waitForFunction(() => {
+      const calls = window.tauriFixture.invokeCalls.filter(
+        (call) => call.command === "configure_clipboard_image_sync",
+      );
+      return calls.at(-1)?.args.enabled === false;
+    });
     await page.waitForFunction(
       () => document.querySelector("#status").textContent === "已断开",
     );

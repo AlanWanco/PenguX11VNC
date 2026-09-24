@@ -2,6 +2,8 @@
 mod onboarding;
 use onboarding::Onboarding;
 
+use crate::clipboard_image::{ClipboardImageSync, StatusCallback, REMOTE_FRAME_PYTHON};
+
 use rand::random;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -1283,6 +1285,100 @@ fn move_clipboard_file(
     Ok(path)
 }
 
+pub(crate) fn spawn_remote_clipboard_image_watch(profile: &Profile) -> io::Result<Child> {
+    let command = format!(
+        "set -eu; export DISPLAY={display}; export XAUTHORITY={auth}; export XDG_RUNTIME_DIR=\"${{XDG_RUNTIME_DIR:-$(dirname -- \"$XAUTHORITY\")}}\"; export WAYLAND_DISPLAY=\"${{WAYLAND_DISPLAY:-wayland-0}}\"; command -v wl-paste >/dev/null 2>&1; command -v python3 >/dev/null 2>&1; exec wl-paste --no-newline --type image/png --watch python3 -c {helper}",
+        display = shell_quote(&profile.display()),
+        auth = shell_quote(&profile.xauthority()),
+        helper = shell_quote(REMOTE_FRAME_PYTHON),
+    );
+    let mut args = ssh_args(profile, None, false)?;
+    args.push(command);
+    hidden_command("ssh")
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+}
+
+pub(crate) fn send_remote_clipboard_image(
+    profile: &Profile,
+    png: &[u8],
+    stop: &AtomicBool,
+) -> io::Result<()> {
+    if png.is_empty() || png.len() > crate::clipboard_image::CLIPBOARD_IMAGE_LIMIT {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "clipboard image size is invalid",
+        ));
+    }
+    let command = format!(
+        "set -eu; export DISPLAY={display}; export XAUTHORITY={auth}; export XDG_RUNTIME_DIR=\"${{XDG_RUNTIME_DIR:-$(dirname -- \"$XAUTHORITY\")}}\"; export WAYLAND_DISPLAY=\"${{WAYLAND_DISPLAY:-wayland-0}}\"; if command -v wl-copy >/dev/null 2>&1; then exec wl-copy --type image/png; elif command -v xclip >/dev/null 2>&1; then exec xclip -selection clipboard -t image/png -i; else exit 127; fi",
+        display = shell_quote(&profile.display()),
+        auth = shell_quote(&profile.xauthority()),
+    );
+    let mut args = ssh_args(profile, None, false)?;
+    args.push(command);
+    let mut child = hidden_command("ssh")
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| io::Error::other("SSH image input is unavailable"))?;
+
+    std::thread::scope(|scope| {
+        let writer = scope.spawn(move || {
+            let mut stdin = stdin;
+            stdin.write_all(png)
+        });
+        let deadline = Instant::now() + Duration::from_secs(90);
+        loop {
+            if stop.load(Ordering::Acquire) {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = writer.join();
+                return Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "image sync stopped",
+                ));
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    let write_result = writer
+                        .join()
+                        .unwrap_or_else(|_| Err(io::Error::other("SSH image writer panicked")));
+                    if !status.success() {
+                        return Err(io::Error::other("remote clipboard rejected image"));
+                    }
+                    return write_result;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = writer.join();
+                    return Err(error);
+                }
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = writer.join();
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "remote clipboard image transfer timed out",
+                ));
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+    })
+}
+
 fn set_remote_file_clipboard(profile: &Profile, paths: &[String]) -> io::Result<()> {
     let mut payload = paths
         .iter()
@@ -1306,6 +1402,7 @@ pub struct ManagerRuntime {
     state: Arc<Mutex<ManagerState>>,
     shutdown: Arc<AtomicBool>,
     join: Option<JoinHandle<()>>,
+    clipboard_image_sync: Mutex<Option<ClipboardImageSync>>,
 }
 
 impl ManagerRuntime {
@@ -1348,7 +1445,38 @@ impl ManagerRuntime {
             state,
             shutdown,
             join: Some(join),
+            clipboard_image_sync: Mutex::new(None),
         })
+    }
+
+    pub fn configure_clipboard_image_sync(
+        &self,
+        enabled: bool,
+        allow_send: bool,
+        on_status: StatusCallback,
+    ) -> io::Result<()> {
+        let mut sync = self
+            .clipboard_image_sync
+            .lock()
+            .map_err(|_| io::Error::other("image clipboard manager locked"))?;
+        if !enabled {
+            if let Some(mut running) = sync.take() {
+                running.stop();
+            }
+            return Ok(());
+        }
+        if let Some(running) = sync.as_ref() {
+            running.set_allow_send(allow_send);
+            return Ok(());
+        }
+        let profile = self
+            .state
+            .lock()
+            .map_err(|_| io::Error::other("manager locked"))?
+            .profile
+            .clone();
+        *sync = Some(ClipboardImageSync::start(profile, allow_send, on_status)?);
+        Ok(())
     }
 
     pub fn upload_clipboard_files(&self, paths: Vec<PathBuf>) -> io::Result<ClipboardUploadResult> {
@@ -1373,6 +1501,11 @@ impl ManagerRuntime {
 
     pub fn stop(&mut self) {
         self.shutdown.store(true, Ordering::Relaxed);
+        if let Ok(mut sync) = self.clipboard_image_sync.lock() {
+            if let Some(mut running) = sync.take() {
+                running.stop();
+            }
+        }
         if let Some(join) = self.join.take() {
             let _ = join.join();
         }

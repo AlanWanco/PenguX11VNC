@@ -99,7 +99,9 @@ chmod 600 ~/.config/pengux11vnc/vnc.pass
 
 ### 剪贴板和文件
 
-文本剪贴板默认不会自动同步，可以在设置中开启。Tauri 使用原生系统剪贴板接口，不依赖 WebView 的 `navigator.clipboard`；浏览器回退版使用浏览器剪贴板 API。Tauri macOS 窗口的 `Cmd+C`/`Cmd+V` 只在远端画布获得焦点时转换为 Linux 的 `Ctrl+C`/`Ctrl+V`；包括连接密码框在内的本地输入框仍保留本机剪贴板行为。
+双向剪贴板同步默认关闭，在设置中用同一个开关启用文字与图片同步。Tauri 使用原生系统剪贴板接口，不依赖 WebView 的 `navigator.clipboard`；浏览器回退版只同步文字。Tauri macOS 窗口的 `Cmd+C`/`Cmd+V` 只在远端画布获得焦点时转换为 Linux 的 `Ctrl+C`/`Ctrl+V`；包括连接密码框在内的本地输入框仍保留本机剪贴板行为。
+
+图片同步仅限 Tauri 桌面版主窗口连接后使用；只传 PNG，压缩数据和解码像素各限制为 50 MiB。远端需要 `wl-paste` 和 Python 3；图片经独立二进制 SSH 通道传输，不写入历史、日志或文件上传队列。关闭总开关或断开连接会停止监听；「只看画面」时不会把本机图片发送到远端。同步不会自动粘贴或发送 QQ 消息。
 
 发送文件时：
 

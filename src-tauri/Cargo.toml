@@ -20,7 +20,8 @@ tauri = { version = "2.0", features = ["tray-icon", "image-png"] }
 url = "2"
 rand = "0.9"
 keyring = { version = "3.6.2", default-features = false, features = ["apple-native", "windows-native", "linux-native-sync-persistent", "crypto-rust"] }
-arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control"] }
+arboard = { version = "3.6.1", default-features = false, features = ["image-data", "wayland-data-control"] }
+png = "0.17"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 winreg = "0.55"

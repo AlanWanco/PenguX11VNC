@@ -53,6 +53,15 @@ try {
     "关闭窗口",
     "Chrome fallback must not advertise native tray behavior",
   );
+  assert.equal(
+    await page.locator("#clipboard-sync").isDisabled(),
+    false,
+    "Browser fallback should keep text clipboard sync available",
+  );
+  assert.match(
+    await page.locator("#clipboard-image-status").textContent(),
+    /仅支持 Tauri 桌面版/,
+  );
   const fileUploadDialog = page.locator("#file-upload-dialog");
   assert.equal(await fileUploadDialog.isVisible(), false);
   await page.evaluate(() =>

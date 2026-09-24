@@ -21,6 +21,11 @@ description = "允许在用户启用剪贴板同步时写入本机文字剪贴�
 commands.allow = ["write_clipboard_text"]
 
 [[permission]]
+identifier = "allow-configure-clipboard-image-sync"
+description = "允许用户明确开启或关闭会话内的 PNG 图片剪贴板同步。"
+commands.allow = ["configure_clipboard_image_sync"]
+
+[[permission]]
 identifier = "allow-read-clipboard-files"
 description = "允许读取用户主动选择的本机文件剪贴板预览。"
 commands.allow = ["read_clipboard_files"]

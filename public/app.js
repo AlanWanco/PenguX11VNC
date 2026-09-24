@@ -37,6 +37,9 @@ let childWatchRetryResolve;
 let childMonitorEpoch = 0;
 let childSnapshotQueue = Promise.resolve();
 let clipboardTimer;
+let clipboardImageSyncActive = false;
+let clipboardImageSyncUnlisten;
+let clipboardImageSyncQueue = Promise.resolve();
 let remoteActivationTimer;
 let remoteActivationInFlight = false;
 let clipboardPasteShortcutInFlight = false;
@@ -125,7 +128,8 @@ function normalizeSettings(value = {}) {
     frameRate: [0, 5, 10, 15, 24, 30, 60].includes(Number(value.frameRate))
       ? Number(value.frameRate)
       : 30,
-    clipboardSync: value.clipboardSync === true,
+    clipboardSync:
+      value.clipboardSync === true || value.clipboardImageSync === true,
     autoChildOpen: value.autoChildOpen !== false,
     systemTitlebar: value.systemTitlebar !== false,
     connectionMode:
@@ -339,11 +343,21 @@ function updateTransportSettingsPresentation() {
       ? "无损 · ZRLE 优先"
       : `${bitrateLabels[settings.bitrate]} · JPEG/Tight`;
 }
+function clipboardImageInactiveStatus() {
+  if (!isTauriShell())
+    return "PNG 图片同步仅支持 Tauri 桌面版；浏览器版仍可同步文字。";
+  if (!isMainSession) return "图片同步由主窗口控制。";
+  if (!settings.clipboardSync) return "当前关闭：不会读取或写入图片剪贴板。";
+  if (!connected) return "PNG 图片同步将在主窗口连接后启动。";
+  return "图片同步未就绪；请检查本机与远端剪贴板服务。";
+}
 function syncSettingsControls() {
   $("wheel").value = settings.wheel;
   $("wheel-value").textContent = `${settings.wheel}%`;
   $("view-only").checked = settings.viewOnly;
   $("clipboard-sync").checked = settings.clipboardSync;
+  if (!clipboardImageSyncActive)
+    $("clipboard-image-status").textContent = clipboardImageInactiveStatus();
   $("connection-mode").value = settings.connectionMode;
   $("connection-mode-settings").textContent =
     connectionModeLabels[
@@ -361,6 +375,7 @@ function syncSettingsControls() {
 }
 function applySettings(value) {
   const previousClipboardSync = settings.clipboardSync;
+  const previousViewOnly = settings.viewOnly;
   const previousVideoSettings = `${settings.bitrate}:${settings.frameRate}`;
   settings = normalizeSettings({ ...settings, ...value });
   const videoSettingsChanged =
@@ -380,6 +395,12 @@ function applySettings(value) {
   setInteractive();
   if (connected && previousClipboardSync !== settings.clipboardSync)
     startClipboardSync();
+  if (
+    connected &&
+    (previousClipboardSync !== settings.clipboardSync ||
+      previousViewOnly !== settings.viewOnly)
+  )
+    void updateClipboardImageSync();
   if (videoSettingsChanged && connected && activeConnectionMode === "video")
     scheduleVideoSettingsRestart();
 }
@@ -977,6 +998,80 @@ function stopClipboardSync() {
   clipboardTimer = undefined;
   localClipboardValue = undefined;
   remoteClipboardValue = undefined;
+}
+function mapClipboardImageStatus(status) {
+  return {
+    started: "图片同步已开启：仅传输 PNG，单张不超过 50 MiB。",
+    sent: "已将本机图片写入远端剪贴板；请在 QQ 中手动粘贴。",
+    received: "已将远端图片写入本机剪贴板。",
+    failed: "图片剪贴板同步失败；请检查本机与远端剪贴板服务。",
+    "invalid-image": "远端图片格式无效或超出限制，已忽略。",
+    "remote-disconnected": "远端图片监听中断；重新连接后会再次启动。",
+  }[status];
+}
+function queueClipboardImageSync(task) {
+  clipboardImageSyncQueue = clipboardImageSyncQueue.catch(() => {}).then(task);
+  return clipboardImageSyncQueue;
+}
+function stopClipboardImageSync() {
+  return queueClipboardImageSync(async () => {
+    if (clipboardImageSyncActive && isTauriShell()) {
+      await tauriInvoke("configure_clipboard_image_sync", {
+        enabled: false,
+        allowSend: false,
+      }).catch(() => {});
+    }
+    clipboardImageSyncActive = false;
+    clipboardImageSyncUnlisten?.();
+    clipboardImageSyncUnlisten = undefined;
+    $("clipboard-image-status").textContent = clipboardImageInactiveStatus();
+  });
+}
+function updateClipboardImageSync() {
+  return queueClipboardImageSync(async () => {
+    const shouldEnable =
+      connected && settings.clipboardSync && isTauriShell() && isMainSession;
+    if (!shouldEnable) {
+      if (clipboardImageSyncActive && isTauriShell()) {
+        await tauriInvoke("configure_clipboard_image_sync", {
+          enabled: false,
+          allowSend: false,
+        }).catch(() => {});
+      }
+      clipboardImageSyncActive = false;
+      clipboardImageSyncUnlisten?.();
+      clipboardImageSyncUnlisten = undefined;
+      $("clipboard-image-status").textContent = clipboardImageInactiveStatus();
+      return;
+    }
+    if (!clipboardImageSyncUnlisten) {
+      const listen = globalThis.__TAURI__?.event?.listen;
+      if (typeof listen === "function") {
+        clipboardImageSyncUnlisten = await listen(
+          "pengux11vnc://clipboard-image-status",
+          (event) => {
+            const message = mapClipboardImageStatus(event.payload);
+            if (message) $("clipboard-image-status").textContent = message;
+          },
+        ).catch(() => undefined);
+      }
+    }
+    try {
+      await tauriInvoke("configure_clipboard_image_sync", {
+        enabled: true,
+        allowSend: !settings.viewOnly,
+      });
+      clipboardImageSyncActive = true;
+      $("clipboard-image-status").textContent =
+        "图片同步已开启：仅传输 PNG，单张不超过 50 MiB。";
+    } catch {
+      clipboardImageSyncActive = false;
+      clipboardImageSyncUnlisten?.();
+      clipboardImageSyncUnlisten = undefined;
+      $("clipboard-image-status").textContent =
+        "无法启动图片同步；请检查本机剪贴板及远端 wl-clipboard/Python 3。";
+    }
+  });
 }
 async function pollClipboard() {
   if (!connected || !settings.clipboardSync) return;
@@ -2315,6 +2410,7 @@ async function connect(prepare = true) {
       $("welcome").hidden = true;
       setInteractive();
       startClipboardSync();
+      void updateClipboardImageSync();
       const canvas = $("screen").querySelector("canvas");
       resizeObserver = new ResizeObserver(() => geometry(false));
       resizeObserver.observe(canvas);
@@ -2357,6 +2453,7 @@ async function connect(prepare = true) {
       if (isMainSession) void cleanupOpenedChildSessions();
       else if (!event.detail.clean) startChildRecoveryMonitor();
       stopClipboardSync();
+      void stopClipboardImageSync();
       stopChildMonitor();
       clearTimeout(remoteActivationTimer);
       remoteActivationTimer = undefined;
@@ -2656,7 +2753,9 @@ $("clipboard-sync").addEventListener("change", () => {
   settings.clipboardSync = $("clipboard-sync").checked;
   save();
   startClipboardSync();
+  void updateClipboardImageSync();
 });
+
 $("child-auto-open").addEventListener("change", () => {
   settings.autoChildOpen = $("child-auto-open").checked;
   save();
@@ -2672,6 +2771,7 @@ $("view-only").addEventListener("change", () => {
   rfb?.wheelLimiter?.reset();
   setInteractive();
   updateMacRemoteShortcuts();
+  if (connected) void updateClipboardImageSync();
   save();
 });
 $("settings-toggle").addEventListener("click", () =>

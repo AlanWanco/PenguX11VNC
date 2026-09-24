@@ -37,6 +37,10 @@ npm ci
 
 在 Tauri 设置中点击「上传剪贴板文件到远端 Downloads」后，应用读取本机文件剪贴板并显示确认信息。单次文件合计上限 50 MiB，仅传送普通文件，不递归传送文件夹。确认后按现有 SSH 私钥配置执行 SCP：文件进入远端 `xdg-user-dir DOWNLOAD` 指向的目录（通常是 `~/Downloads`），并将远端路径写入 Linux `text/uri-list` 剪贴板。回到 QQ 窗口手动按 `Ctrl+V`（macOS 使用 `Cmd+V`），不会自动发送消息。
 
+### 图片剪贴板同步
+
+设置中的「双向剪贴板同步」总开关同时控制文字和 PNG 图片；默认关闭。图片同步仅限 Tauri 桌面版主窗口连接后使用。当前只同步 PNG，压缩数据和解码像素各不超过 50 MiB。远端需要 `wl-paste`、Python 3 和用于写入的 `wl-copy`（或 X11 下的 `xclip`）。图片经本次 SSH 会话的独立二进制通道传输；应用不将内容持久化为历史或日志，双方系统剪贴板仍会按各自策略保留当前内容。关闭总开关或断开连接会停止远端监听。只看模式会阻止本机图片发送到远端；同步不会自动粘贴或发送 QQ 消息，文件上传仍是独立功能。
+
 远端针对 X11/XWayland QQ 先尝试 `xclip` 写入 `text/uri-list`，若 `python3` 可用还会启动内置 X11 剪贴板 owner，补充 GNOME/KDE 的多 MIME 文件格式；`xclip` 不可用时再尝试 `wl-copy`，最后使用该 Python/X11 写入器。若 QQ/桌面未接受文件剪贴板格式，界面会报告失败或仍需使用远端文件管理器。Chrome 回退入口不读取本机文件剪贴板。
 
 ### 隐藏、恢复和退出
@@ -110,6 +114,7 @@ chmod 600 ~/.config/pengux11vnc/connections.json
 | `window.display` / `xauthority` / `id` | Linux Xwayland 会话信息                                                                                               |
 | `helpers.windowList` / `imeCapture`    | 远端 helper 的绝对路径                                                                                                |
 | `clipboard.sync`                       | 是否允许此配置档启用剪贴板同步，默认 `false`                                                                          |
+| `viewer.clipboardSync`                 | 双向文字/图片同步偏好，默认 `false`；可在 Tauri 设置中切换，浏览器回退版只同步文字                                    |
 | `viewer.bitrate`                       | `lossless`、`high`、`balanced`、`low`；VNC 默认无损，视频默认沿用 `video.bitrateKbps`；其他视频档目标为 8/4/1.5 Mbps  |
 | `viewer.frameRate`                     | `0` 不限，或 `5/10/15/24/30/60`；默认 `30`，视频的 `0` 表示最高 60 FPS                                                |
 | `viewer.connectionMode`                | `vnc` 或 `video`；仅在主页连接前选择，默认 `vnc`                                                                      |
@@ -163,7 +168,7 @@ python3 tools/launch.py --no-open
 1. 点「连接窗口」；
 2. 「适应」保持比例，「1:1」查看原始像素；
 3. 设置中调滚轮、传输码率和帧率；
-4. 需要时开启双向剪贴板同步；Tauri 桌面版通过系统剪贴板接口读写，浏览器回退版使用浏览器剪贴板 API；
+4. 需要时开启双向剪贴板同步；Tauri 同步文字和 PNG 图片，浏览器回退版只同步文字；
 5. 关闭 Tauri 系统标题栏后，可点击顶部右侧按钮展开细工具栏；关闭按钮固定在顶部栏最右侧。
 
 ## 7. 常见问题
