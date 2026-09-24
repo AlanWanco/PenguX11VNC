@@ -161,6 +161,10 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 应用只监听本机端口，远端服务只监听远端本机地址，通信由 SSH 加密。不要把本地服务反代到公网，也不要分享运行时配置、连接密码或私钥。
 
-## 许可
+## 致谢与许可
 
-PenguX11VNC 外层代码使用 MIT 许可证。noVNC 使用 MPL-2.0，详见仓库中的第三方许可证文件。
+感谢 [noVNC 项目及其贡献者](https://github.com/novnc/noVNC) 提供优秀的 VNC/RFB 核心实现。PenguX11VNC 使用 `@novnc/novnc` 1.7.0；`public/qq-rfb.js` 是围绕 noVNC RFB 实现编写的项目适配层，并按 MPL-2.0 许可。noVNC 核心版权归 noVNC 作者所有。
+
+noVNC 的版权与许可说明见依赖包中的 `LICENSE.txt`，MPL-2.0 正文见 `docs/LICENSE.MPL-2.0`（运行 `npm ci` 后位于 `node_modules/@novnc/novnc/`），也可查看 [noVNC v1.7.0 源码及许可证](https://github.com/novnc/noVNC/tree/v1.7.0) 和 [MPL-2.0 正文](https://www.mozilla.org/MPL/2.0/)。
+
+PenguX11VNC 的其他代码使用 MIT 许可证，详见仓库中的 [LICENSE](LICENSE)。noVNC 与 PenguX11VNC 是独立项目；鸣谢不代表 noVNC 作者对本项目的背书。

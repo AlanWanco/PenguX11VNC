@@ -313,6 +313,9 @@ function currentFrameRateLabel() {
 }
 function updateTransportSettingsPresentation() {
   const video = selectedTransportMode() === "video";
+  $("transport-panel-foot").textContent = video
+    ? "WebRTC/VP8 视频 · RFB 控制 · 本地私有连接 · 不经过云端"
+    : "noVNC 1.7 · 本地私有连接 · 不经过云端";
   const bitrate = $("bitrate");
   $("bitrate-label").textContent = video ? "视频码率档位" : "VNC 图像质量";
   bitrate.setAttribute("aria-label", video ? "视频码率档位" : "VNC 图像质量");

@@ -160,10 +160,13 @@ jobs:
               --bundles app
             app_path="src-tauri/target/${{ matrix.target }}/release/bundle/macos/PenguX11VNC.app"
             dmg_dir="src-tauri/target/${{ matrix.target }}/release/bundle/dmg"
+            dmg_stage="$(mktemp -d "$RUNNER_TEMP/PenguX11VNC-dmg.XXXXXX")"
             mkdir -p "$dmg_dir"
+            ditto "$app_path" "$dmg_stage/PenguX11VNC.app"
+            ln -s /Applications "$dmg_stage/Applications"
             hdiutil create \
               -volname "PenguX11VNC" \
-              -srcfolder "$app_path" \
+              -srcfolder "$dmg_stage" \
               -ov \
               -format UDZO \
               "$dmg_dir/PenguX11VNC_ci.dmg"

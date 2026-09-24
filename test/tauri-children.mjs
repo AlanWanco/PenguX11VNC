@@ -238,6 +238,11 @@ export async function testTauriChildren(browser, app, mock) {
       await page.locator("#connection-mode option:checked").textContent(),
       "WebRTC 视频流（VP8 / UDP）",
     );
+    assert.equal(
+      await page.locator("#transport-panel-foot").textContent(),
+      "WebRTC/VP8 视频 · RFB 控制 · 本地私有连接 · 不经过云端",
+      "The settings footer must identify WebRTC video separately from noVNC",
+    );
     await page.click("#settings-toggle");
     await page.selectOption("#bitrate", "high");
     assert.equal(await page.locator("#bitrate-value").textContent(), "高");
@@ -251,6 +256,11 @@ export async function testTauriChildren(browser, app, mock) {
     await page.selectOption("#frame-rate", "30");
     await page.click("#settings-close");
     await page.selectOption("#connection-mode", "vnc");
+    assert.equal(
+      await page.locator("#transport-panel-foot").textContent(),
+      "noVNC 1.7 · 本地私有连接 · 不经过云端",
+      "The footer must return to the noVNC label in standard VNC mode",
+    );
     await page.waitForTimeout(180);
     await page.click("#connect");
     await page.waitForFunction(
