@@ -164,12 +164,32 @@ jobs:
             mkdir -p "$dmg_dir"
             ditto "$app_path" "$dmg_stage/PenguX11VNC.app"
             ln -s /Applications "$dmg_stage/Applications"
+
+            # hdiutil's automatic sizing underestimates this bundle on hosted
+            # runners and can fill the mounted image while copying the Node runtime.
+            stage_kib="$(du -skA "$dmg_stage" | awk '{print $1}')"
+            dmg_size_mib=$(((stage_kib * 5 + 4095) / 4096 + 512))
+            if ((dmg_size_mib < 1024)); then dmg_size_mib=1024; fi
+            echo "DMG filesystem size: ${dmg_size_mib} MiB (staged app: ${stage_kib} KiB)"
+
+            # The .app is self-contained now; discard release-only compiler
+            # intermediates before hdiutil needs temporary image space.
+            rm -rf \
+              "src-tauri/target/${{ matrix.target }}/release/deps" \
+              "src-tauri/target/${{ matrix.target }}/release/build" \
+              "src-tauri/target/${{ matrix.target }}/release/incremental"
+            rm -f "src-tauri/target/${{ matrix.target }}/release/pengux11vnc"
+            df -h "$RUNNER_TEMP"
+
             hdiutil create \
+              -size "${dmg_size_mib}m" \
+              -fs HFS+ \
               -volname "PenguX11VNC" \
               -srcfolder "$dmg_stage" \
               -ov \
               -format UDZO \
               "$dmg_dir/PenguX11VNC_ci.dmg"
+            rm -rf "$dmg_stage"
           else
             npm run tauri:build -- \
               --target "${{ matrix.target }}" \
