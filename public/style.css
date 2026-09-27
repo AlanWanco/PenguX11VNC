@@ -159,7 +159,7 @@ button.bar-danger:disabled {
 .titlebar-toggle[data-expanded="true"] .expanded-icon {
   display: block;
 }
-body.no-system-titlebar:not(.titlebar-expanded) .titlebar {
+body.no-system-titlebar:not(.titlebar-expanded):not(.setup-page) .titlebar {
   height: 20px;
   position: relative;
   padding: 0 5px;
@@ -167,12 +167,13 @@ body.no-system-titlebar:not(.titlebar-expanded) .titlebar {
   background: #241936;
   border-bottom-color: #6e4ca766;
 }
-body.no-system-titlebar:not(.titlebar-expanded)
+body.no-system-titlebar:not(.titlebar-expanded):not(.setup-page)
   .titlebar
   > :not(.titlebar-toggle) {
   display: none;
 }
-body.no-system-titlebar:not(.titlebar-expanded) .titlebar-toggle {
+body.no-system-titlebar:not(.titlebar-expanded):not(.setup-page)
+  .titlebar-toggle {
   display: inline-flex;
   position: absolute;
   right: 4px;
@@ -226,7 +227,8 @@ body.no-system-titlebar.titlebar-expanded .titlebar-toggle .bar-icon {
   width: 15px;
   height: 15px;
 }
-body.no-system-titlebar:not(.titlebar-expanded) .window-close-control {
+body.no-system-titlebar:not(.titlebar-expanded):not(.setup-page)
+  .window-close-control {
   display: none;
 }
 .identity {
@@ -306,7 +308,8 @@ nav {
 body.tauri-shell .window-close-control {
   display: inline-flex;
 }
-body.no-system-titlebar:not(.titlebar-expanded) .window-close-control {
+body.no-system-titlebar:not(.titlebar-expanded):not(.setup-page)
+  .window-close-control {
   display: none;
 }
 body.no-system-titlebar .titlebar {
@@ -867,13 +870,28 @@ body.immersive #screen {
   }
 }
 
-/* First-run guidance must remain scrollable even without a remote session. */
+/* Keep setup navigation visible while the form scrolls independently. */
 body.setup-page {
-  display: block;
-  height: auto;
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
   min-height: 100vh;
-  overflow: auto;
+  overflow: hidden;
+  padding: 0;
+}
+.setup-topbar {
+  justify-content: flex-start;
+  flex: 0 0 auto;
+}
+.setup-topbar .identity {
+  margin-right: auto;
+}
+.setup-main {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
   padding: 24px;
+  background: radial-gradient(ellipse at 45% 42%, #24202d 0%, #131217 62%);
 }
 .setup-card {
   max-width: 880px;
@@ -887,19 +905,6 @@ body.setup-page {
 }
 .setup-card header h1 {
   margin: 0;
-}
-.setup-back {
-  flex: 0 0 40px;
-  width: 40px;
-  height: 40px;
-  padding: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-color: var(--border);
-  background: #ffffff09;
-  font-size: 24px;
-  line-height: 1;
 }
 .setup-card fieldset,
 .setup-card section,
@@ -995,7 +1000,7 @@ body.setup-page {
   .setup-grid {
     grid-template-columns: 1fr;
   }
-  body.setup-page {
+  .setup-main {
     padding: 12px;
   }
 }

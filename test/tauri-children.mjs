@@ -153,6 +153,8 @@ export async function testTauriChildren(browser, app, mock) {
     ),
   );
   assert(capability.permissions.includes("core:window:allow-close"));
+  assert(capability.permissions.includes("core:window:allow-start-dragging"));
+  assert(capability.permissions.includes("core:window:allow-is-decorated"));
   assert(capability.permissions.includes("allow-read-clipboard-text"));
   assert(capability.permissions.includes("allow-write-clipboard-text"));
   assert(

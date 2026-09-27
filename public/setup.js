@@ -20,6 +20,25 @@ let busy = false;
 const status = (text) => {
   $("setup-status").textContent = text;
 };
+function currentTauriWindow() {
+  return globalThis.__TAURI__?.window?.getCurrentWindow?.();
+}
+// The wizard reuses the main window, so it must restore the frameless chrome:
+// without a system titlebar the in-page bar is the only way to move or close it.
+async function applyWindowChrome() {
+  const current = currentTauriWindow();
+  if (!current) return;
+  document.body.classList.add("tauri-shell");
+  let decorated = true;
+  try {
+    if (typeof current.isDecorated === "function")
+      decorated = (await current.isDecorated()) !== false;
+  } catch {
+    decorated = true;
+  }
+  document.body.classList.toggle("no-system-titlebar", !decorated);
+}
+void applyWindowChrome();
 function formDraft() {
   return {
     name: $("setup-name").value,
@@ -196,6 +215,22 @@ $("setup-save").addEventListener("click", async () => {
 });
 $("setup-back").addEventListener("click", () => {
   location.href = `./#token=${encodeURIComponent(token)}`;
+});
+$("setup-topbar").addEventListener("pointerdown", (event) => {
+  if (
+    !document.body.classList.contains("no-system-titlebar") ||
+    event.button !== 0 ||
+    event.target.closest("button, input, select, textarea, a, summary")
+  )
+    return;
+  currentTauriWindow()
+    ?.startDragging?.()
+    .catch(() => {});
+});
+$("setup-close").addEventListener("click", () => {
+  currentTauriWindow()
+    ?.close?.()
+    .catch(() => status("窗口关闭失败，请重试。"));
 });
 try {
   const data = await api("/api/setup");

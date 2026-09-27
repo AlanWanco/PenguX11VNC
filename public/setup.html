@@ -10,206 +10,230 @@
     <script type="module" src="./setup.js"></script>
   </head>
   <body class="setup-page">
-    <article class="setup-card">
-      <header>
-        <button
-          id="setup-back"
-          class="setup-back"
-          type="button"
-          aria-label="返回首页，不保存修改"
-          title="返回首页（不保存修改）"
-        >
-          ←
-        </button>
-        <img src="./icon.svg" width="48" height="48" alt="" />
-        <h1>连接你的 Linux QQ</h1>
-      </header>
-      <p>
-        填写本机 SSH 资料；只读预检用于选择 QQ
-        窗口。点击下方唯一的保存按钮写入本机配置并返回首页；不会自动连接或启动远端服务。
-      </p>
-      <p id="setup-status" role="status" aria-live="polite">读取配置中…</p>
-      <form id="setup-form">
-        <fieldset id="setup-fields">
-          <legend>1 · 本机 SSH 连接</legend>
-          <label
-            >连接名称<input
-              id="setup-name"
-              value="Linux QQ"
-              maxlength="80"
-              required
-          /></label>
-          <div class="setup-grid">
-            <label
-              >远端主机 / IP<input
-                id="setup-host"
-                placeholder="linux.example"
-                required
-                autocomplete="off"
-            /></label>
-            <label
-              >SSH 端口<input
-                id="setup-port"
-                type="number"
-                min="1"
-                max="65535"
-                value="22"
-                required
-            /></label>
-            <label
-              >远端用户名<input
-                id="setup-user"
-                placeholder="与远端登录桌面的用户一致"
-                required
-                autocomplete="off"
-            /></label>
-            <label
-              >本机私钥路径（可选）<input
-                id="setup-key"
-                placeholder="留空使用 SSH agent / 默认密钥"
-                autocomplete="off"
-            /></label>
-          </div>
-          <p class="help">
-            只填写本机密钥路径，不粘贴密钥内容。私钥不会上传；加密密钥先加入
-            ssh-agent。当前向导使用密钥认证，不保存 SSH 密码或口令。
-          </p>
-          <details>
-            <summary>首次 SSH 连接失败怎么办？</summary>
-            <ol>
-              <li>
-                远端需要 Linux 图形会话、SSH 服务，以及已运行且可见的
-                QQ（X11/Xwayland）。SSH 用户应与 QQ 所属用户一致。
-              </li>
-              <li>
-                在本机终端首次执行
-                <code>ssh -p 22 用户名@主机</code
-                >，与远端核对主机指纹后才信任。程序不会自动跳过主机密钥检查。
-              </li>
-              <li>
-                加密私钥先执行 <code>ssh-add /本机/私钥路径</code>；Unix
-                私钥权限应为 600。
-              </li>
-              <li>
-                再执行
-                <code>ssh -o BatchMode=yes -p 22 用户名@主机 true</code
-                >，无需交互成功后返回预检。端口按实际修改。
-              </li>
-            </ol>
-          </details>
-          <details>
-            <summary>高级：远端 VNC 密码文件</summary>
-            <label
-              >已有密码文件绝对路径<input
-                id="setup-password-path"
-                placeholder="留空使用远端 ~/.config/pengux11vnc/vnc.pass"
-                autocomplete="off"
-            /></label>
-            <p class="help">
-              这是远端文件路径，不是密码。留空会自动检查远端
-              <code>$XDG_RUNTIME_DIR/x11vnc.pass</code>（通常是
-              <code>/run/user/&lt;UID&gt;/x11vnc.pass</code>）和
-              <code>~/.config/pengux11vnc/vnc.pass</code>，不需要猜路径。
-            </p>
-          </details>
-          <button type="submit" id="setup-probe" class="primary setup-action">
-            2 · 运行只读预检
-          </button>
-          <p class="help">
-            预检只读取当前用户 QQ 进程及 X11
-            窗口元数据、依赖状态和密码文件权限；不读取聊天文字、截图或剪贴板，不安装软件、不启动服务。
-          </p>
-        </fieldset>
-      </form>
-      <section id="setup-result" hidden>
-        <h2>预检结果</h2>
-        <ul id="setup-checks"></ul>
-        <label
-          >3 · 选择要连接的主窗口<select id="setup-window">
-            <option value="">请先预检</option>
-          </select></label
-        >
-        <p class="help">
-          仅列出当前用户的 QQ
-          普通可见窗口，并核对进程。一个候选时自动选中，多个候选时请按 XID /
-          尺寸选择；不会按最大窗口猜测。可暂时隐藏其他 QQ
-          窗口再预检。检测到进程不代表 QQ 已登录。
-        </p>
-        <label class="setup-checkbox"
-          ><input id="setup-recover" type="checkbox" checked />QQ
-          重启或网络恢复后自动重连（每轮完成后等待 5 秒）</label
-        >
-        <p class="help">
-          只自动恢复到同一 QQ
-          可执行文件、类名和实例名下唯一的普通窗口；有歧义时暂停并要求重新选择。恢复只在本次点击连接后有效，主动断开会停止。
-        </p>
-      </section>
-      <button id="setup-save" class="primary setup-action" type="button">
-        保存配置并返回首页
+    <header id="setup-topbar" class="titlebar setup-topbar">
+      <button
+        id="setup-back"
+        class="bar-icon-button"
+        type="button"
+        aria-label="返回首页，不保存修改"
+        title="返回首页（不保存修改）"
+      >
+        <svg class="bar-icon" viewBox="0 0 18 18" aria-hidden="true">
+          <path d="M10 3 4 9l6 6M4 9h12" />
+        </svg>
       </button>
-      <p class="help">
-        这是本页唯一的保存按钮。若本次预检通过且已选中 QQ
-        窗口，会保存完整连接配置；否则只保存 SSH
-        连接资料，首页会提示继续预检。两种情况都只写本机配置、不启动远端服务。点击首页“连接窗口”时，软件会再明确询问是否允许启动远端单窗口
-        VNC。
-      </p>
-      <details id="setup-help">
-        <summary>远端缺少依赖、看不到 QQ 或不知道怎么准备？</summary>
-        <h3>在远端做一次准备（不会自动执行）</h3>
+      <div class="identity">
+        <img src="./icon.svg" alt="" />
+        <div>
+          <strong>PenguX11VNC <span>· 连接配置</span></strong>
+          <small>Linux · 单窗口远程连接</small>
+        </div>
+      </div>
+      <button
+        id="setup-close"
+        class="window-close-control"
+        type="button"
+        title="关闭窗口"
+        aria-label="关闭窗口"
+      >
+        <svg class="bar-icon" viewBox="0 0 18 18" aria-hidden="true">
+          <path d="m3 3 12 12M15 3 3 15" />
+        </svg>
+      </button>
+    </header>
+    <main class="setup-main">
+      <article class="setup-card">
+        <header>
+          <img src="./icon.svg" width="48" height="48" alt="" />
+          <h1>连接你的 Linux QQ</h1>
+        </header>
         <p>
-          CachyOS / Arch：<code
-            >sudo pacman -S --needed openssh x11vnc python libx11</code
-          >（仅定向安装，不执行全系统升级）。Debian / Ubuntu：安装
-          <code>openssh-server x11vnc python3 libx11-6</code
-          >。先确认发行版及软件仓库状态，再自行执行。
+          填写本机 SSH 资料；只读预检用于选择 QQ
+          窗口。点击下方唯一的保存按钮写入本机配置并返回首页；不会自动连接或启动远端服务。
         </p>
-        <p>
-          按系统方式启用 SSH 服务，并只对可信网络开放 SSH；不要开放 VNC 端口。QQ
-          必须在同一用户的桌面会话中运行并显示。
+        <p id="setup-status" role="status" aria-live="polite">读取配置中…</p>
+        <form id="setup-form">
+          <fieldset id="setup-fields">
+            <legend>1 · 本机 SSH 连接</legend>
+            <label
+              >连接名称<input
+                id="setup-name"
+                value="Linux QQ"
+                maxlength="80"
+                required
+            /></label>
+            <div class="setup-grid">
+              <label
+                >远端主机 / IP<input
+                  id="setup-host"
+                  placeholder="linux.example"
+                  required
+                  autocomplete="off"
+              /></label>
+              <label
+                >SSH 端口<input
+                  id="setup-port"
+                  type="number"
+                  min="1"
+                  max="65535"
+                  value="22"
+                  required
+              /></label>
+              <label
+                >远端用户名<input
+                  id="setup-user"
+                  placeholder="与远端登录桌面的用户一致"
+                  required
+                  autocomplete="off"
+              /></label>
+              <label
+                >本机私钥路径（可选）<input
+                  id="setup-key"
+                  placeholder="留空使用 SSH agent / 默认密钥"
+                  autocomplete="off"
+              /></label>
+            </div>
+            <p class="help">
+              只填写本机密钥路径，不粘贴密钥内容。私钥不会上传；加密密钥先加入
+              ssh-agent。当前向导使用密钥认证，不保存 SSH 密码或口令。
+            </p>
+            <details>
+              <summary>首次 SSH 连接失败怎么办？</summary>
+              <ol>
+                <li>
+                  远端需要 Linux 图形会话、SSH 服务，以及已运行且可见的
+                  QQ（X11/Xwayland）。SSH 用户应与 QQ 所属用户一致。
+                </li>
+                <li>
+                  在本机终端首次执行
+                  <code>ssh -p 22 用户名@主机</code
+                  >，与远端核对主机指纹后才信任。程序不会自动跳过主机密钥检查。
+                </li>
+                <li>
+                  加密私钥先执行 <code>ssh-add /本机/私钥路径</code>；Unix
+                  私钥权限应为 600。
+                </li>
+                <li>
+                  再执行
+                  <code>ssh -o BatchMode=yes -p 22 用户名@主机 true</code
+                  >，无需交互成功后返回预检。端口按实际修改。
+                </li>
+              </ol>
+            </details>
+            <details>
+              <summary>高级：远端 VNC 密码文件</summary>
+              <label
+                >已有密码文件绝对路径<input
+                  id="setup-password-path"
+                  placeholder="留空使用远端 ~/.config/pengux11vnc/vnc.pass"
+                  autocomplete="off"
+              /></label>
+              <p class="help">
+                这是远端文件路径，不是密码。留空会自动检查远端
+                <code>$XDG_RUNTIME_DIR/x11vnc.pass</code>（通常是
+                <code>/run/user/&lt;UID&gt;/x11vnc.pass</code>）和
+                <code>~/.config/pengux11vnc/vnc.pass</code>，不需要猜路径。
+              </p>
+            </details>
+            <button type="submit" id="setup-probe" class="primary setup-action">
+              2 · 运行只读预检
+            </button>
+            <p class="help">
+              预检只读取当前用户 QQ 进程及 X11
+              窗口元数据、依赖状态和密码文件权限；不读取聊天文字、截图或剪贴板，不安装软件、不启动服务。
+            </p>
+          </fieldset>
+        </form>
+        <section id="setup-result" hidden>
+          <h2>预检结果</h2>
+          <ul id="setup-checks"></ul>
+          <label
+            >3 · 选择要连接的主窗口<select id="setup-window">
+              <option value="">请先预检</option>
+            </select></label
+          >
+          <p class="help">
+            仅列出当前用户的 QQ
+            普通可见窗口，并核对进程。一个候选时自动选中，多个候选时请按 XID /
+            尺寸选择；不会按最大窗口猜测。可暂时隐藏其他 QQ
+            窗口再预检。检测到进程不代表 QQ 已登录。
+          </p>
+          <label class="setup-checkbox"
+            ><input id="setup-recover" type="checkbox" checked />QQ
+            重启或网络恢复后自动重连（每轮完成后等待 5 秒）</label
+          >
+          <p class="help">
+            只自动恢复到同一 QQ
+            可执行文件、类名和实例名下唯一的普通窗口；有歧义时暂停并要求重新选择。恢复只在本次点击连接后有效，主动断开会停止。
+          </p>
+        </section>
+        <button id="setup-save" class="primary setup-action" type="button">
+          保存配置并返回首页
+        </button>
+        <p class="help">
+          这是本页唯一的保存按钮。若本次预检通过且已选中 QQ
+          窗口，会保存完整连接配置；否则只保存 SSH
+          连接资料，首页会提示继续预检。两种情况都只写本机配置、不启动远端服务。点击首页“连接窗口”时，软件会再明确询问是否允许启动远端单窗口
+          VNC。
         </p>
-        <p>
-          在远端终端创建专用 VNC
-          密码文件（命令交互输入，勿在命令行写明文密码）：
-        </p>
-        <pre>
+        <details id="setup-help">
+          <summary>远端缺少依赖、看不到 QQ 或不知道怎么准备？</summary>
+          <h3>在远端做一次准备（不会自动执行）</h3>
+          <p>
+            CachyOS / Arch：<code
+              >sudo pacman -S --needed openssh x11vnc python libx11</code
+            >（仅定向安装，不执行全系统升级）。Debian / Ubuntu：安装
+            <code>openssh-server x11vnc python3 libx11-6</code
+            >。先确认发行版及软件仓库状态，再自行执行。
+          </p>
+          <p>
+            按系统方式启用 SSH 服务，并只对可信网络开放 SSH；不要开放 VNC
+            端口。QQ 必须在同一用户的桌面会话中运行并显示。
+          </p>
+          <p>
+            在远端终端创建专用 VNC
+            密码文件（命令交互输入，勿在命令行写明文密码）：
+          </p>
+          <pre>
 mkdir -p ~/.config/pengux11vnc
 chmod 700 ~/.config/pengux11vnc
 x11vnc -storepasswd ~/.config/pengux11vnc/vnc.pass
 chmod 600 ~/.config/pengux11vnc/vnc.pass</pre>
-        <p>
-          如果文件已存在，请先备份，不要直接覆盖。连接时在本软件密码弹窗输入同一个
-          VNC 密码。VNC 密码文件只是可逆混淆，不可公开。
+          <p>
+            如果文件已存在，请先备份，不要直接覆盖。连接时在本软件密码弹窗输入同一个
+            VNC 密码。VNC 密码文件只是可逆混淆，不可公开。
+          </p>
+          <h3>分清这几种状态</h3>
+          <ul>
+            <li>
+              SSH 失败：检查网络、SSH 服务、端口、用户名、主机指纹和
+              agent；不要关闭主机密钥检查。
+            </li>
+            <li>QQ 未运行：在远端手动启动已有 QQ；本工具不会启动或登录 QQ。</li>
+            <li>
+              QQ 在运行但无可见窗口：从远端托盘显示主窗口；确认 SSH
+              和桌面为同一用户。原生 Wayland 窗口不受支持，不能退回全桌面捕获。
+            </li>
+            <li>
+              无法访问显示会话：确认 QQ 使用 X11/Xwayland，DISPLAY 和 XAUTHORITY
+              可从其进程读取；不要将 SSH shell 的空环境变量当作 QQ 后端证据。
+            </li>
+            <li>
+              多个主窗口候选：手动选择或隐藏其他窗口后重试。不会仅凭进程名就开始采集。
+            </li>
+            <li>
+              候选框 helper 未就绪：不影响主画面连接；IME
+              叠层是可选实验功能，需要另行部署 capture-ime，且只支持 Fcitx X11
+              popup。
+            </li>
+          </ul>
+        </details>
+        <p class="help">
+          配置仅存于本机
+          ~/.config/pengux11vnc/connections.json。保存前备份原文件；令牌、密码、私钥不写入此配置。当前仍需要系统
+          OpenSSH；安装包已内置 Node.js。
         </p>
-        <h3>分清这几种状态</h3>
-        <ul>
-          <li>
-            SSH 失败：检查网络、SSH 服务、端口、用户名、主机指纹和
-            agent；不要关闭主机密钥检查。
-          </li>
-          <li>QQ 未运行：在远端手动启动已有 QQ；本工具不会启动或登录 QQ。</li>
-          <li>
-            QQ 在运行但无可见窗口：从远端托盘显示主窗口；确认 SSH
-            和桌面为同一用户。原生 Wayland 窗口不受支持，不能退回全桌面捕获。
-          </li>
-          <li>
-            无法访问显示会话：确认 QQ 使用 X11/Xwayland，DISPLAY 和 XAUTHORITY
-            可从其进程读取；不要将 SSH shell 的空环境变量当作 QQ 后端证据。
-          </li>
-          <li>
-            多个主窗口候选：手动选择或隐藏其他窗口后重试。不会仅凭进程名就开始采集。
-          </li>
-          <li>
-            候选框 helper 未就绪：不影响主画面连接；IME
-            叠层是可选实验功能，需要另行部署 capture-ime，且只支持 Fcitx X11
-            popup。
-          </li>
-        </ul>
-      </details>
-      <p class="help">
-        配置仅存于本机
-        ~/.config/pengux11vnc/connections.json。保存前备份原文件；令牌、密码、私钥不写入此配置。当前仍需要系统
-        OpenSSH；安装包已内置 Node.js。
-      </p>
-    </article>
+      </article>
+    </main>
   </body>
 </html>

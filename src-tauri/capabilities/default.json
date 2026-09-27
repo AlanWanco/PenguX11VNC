@@ -13,6 +13,7 @@
     "core:window:allow-set-focus",
     "core:window:allow-set-size",
     "core:window:allow-set-decorations",
+    "core:window:allow-is-decorated",
     "core:window:allow-start-dragging",
     "allow-set-main-window-aspect",
     "allow-set-macos-remote-shortcuts",

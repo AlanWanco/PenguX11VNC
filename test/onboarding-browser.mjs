@@ -124,6 +124,35 @@ const browser = await chromium.launch({ channel: "chrome", headless: true });
 const page = await browser.newPage();
 const errors = [];
 page.on("pageerror", (error) => errors.push(error.message));
+// The wizard runs in the main window. Model a frameless window so the in-page
+// top bar must supply both dragging and closing.
+await page.addInitScript(() => {
+  if (!location.pathname.endsWith("/setup.html")) return;
+  const fixture = { dragCalls: 0, closeCalls: 0 };
+  window.__setupChrome = fixture;
+  window.__TAURI__ = {
+    window: {
+      getCurrentWindow: () => ({
+        async isDecorated() {
+          return false;
+        },
+        async startDragging() {
+          fixture.dragCalls++;
+        },
+        async close() {
+          fixture.closeCalls++;
+        },
+      }),
+    },
+  };
+});
+const setupChrome = () =>
+  page.evaluate(() => ({
+    ...window.__setupChrome,
+    frameless: document.body.classList.contains("no-system-titlebar"),
+    closeVisible: getComputedStyle(document.getElementById("setup-close"))
+      .display,
+  }));
 try {
   const unauthorized = await fetch(`${app.origin}/api/setup/preflight`, {
     method: "POST",
@@ -155,7 +184,44 @@ try {
   );
   await page.click("#setup-open");
   await page.waitForURL("**/setup.html");
+  assert(await page.locator("#setup-topbar").isVisible());
+  assert.equal(await page.locator("#setup-topbar #setup-back").count(), 1);
+  assert.equal(await page.locator(".setup-card #setup-back").count(), 0);
   assert.equal(starts, 0, "Opening setup must not start SSH/VNC");
+  const initialChrome = await setupChrome();
+  assert.equal(
+    initialChrome.frameless,
+    true,
+    "The wizard must detect a frameless window",
+  );
+  assert.notEqual(
+    initialChrome.closeVisible,
+    "none",
+    "A frameless wizard must stay closable",
+  );
+  assert.equal(initialChrome.dragCalls, 0);
+  await page.locator("#setup-topbar .identity").dispatchEvent("pointerdown", {
+    button: 0,
+  });
+  assert.equal(
+    (await setupChrome()).dragCalls,
+    1,
+    "The wizard top bar must drag the window when frameless",
+  );
+  await page.locator("#setup-topbar #setup-back").dispatchEvent("pointerdown", {
+    button: 0,
+  });
+  assert.equal(
+    (await setupChrome()).dragCalls,
+    1,
+    "Top bar buttons must stay clickable instead of dragging the window",
+  );
+  await page.click("#setup-close");
+  assert.equal(
+    (await setupChrome()).closeCalls,
+    1,
+    "A frameless wizard must be closable",
+  );
   await page.fill("#setup-host", "fail.invalid");
   await page.click("#setup-probe");
   await page.waitForFunction(() =>
