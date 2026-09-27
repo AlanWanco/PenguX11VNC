@@ -2767,6 +2767,7 @@ $("child-auto-open").addEventListener("change", () => {
 });
 $("child-refresh").addEventListener("click", () => pollChildWindows(true));
 $("view-only").addEventListener("change", () => {
+  if ($("view-only").checked) rfb?.resetPointerState?.();
   settings.viewOnly = $("view-only").checked;
   rfb?.wheelLimiter?.reset();
   setInteractive();

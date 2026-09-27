@@ -13,10 +13,13 @@ let configured = false;
 let multiple = false;
 let remoteState = "ready";
 let saved = 0;
+let draftSaves = 0;
+let preflights = 0;
 let starts = 0;
 let stops = 0;
 let polls = 0;
-const profile = {
+let pendingProfile;
+let profile = {
   id: "onboarding-test",
   name: "Test QQ",
   ssh: { user: "user", host: "linux.example", port: 22 },
@@ -32,11 +35,29 @@ const manager = http.createServer(async (req, res) => {
   let data = {};
   let code = 200;
   if (req.url === "/setup") data = { available: true, configured, profile };
-  else if (req.url === "/setup/preflight") {
+  else if (req.url === "/setup/draft") {
+    draftSaves++;
+    profile = {
+      ...profile,
+      name: body.name,
+      ssh: body.ssh,
+      vnc: { ...profile.vnc, remotePasswordFile: body.remotePasswordFile },
+      managed: { ...profile.managed, setupPending: true },
+    };
+    configured = false;
+    data = { savedLocally: true, configured, profile };
+  } else if (req.url === "/setup/preflight") {
+    preflights++;
     if (body.ssh.host === "fail.invalid") {
       code = 500;
       data = { error: "SSH 认证失败，请检查 agent" };
-    } else
+    } else {
+      pendingProfile = {
+        ...profile,
+        name: body.name,
+        ssh: body.ssh,
+        vnc: { ...profile.vnc, remotePasswordFile: body.remotePasswordFile },
+      };
       data = {
         running: true,
         displayAccessible: true,
@@ -58,10 +79,15 @@ const manager = http.createServer(async (req, res) => {
             : []),
         ],
       };
+    }
   } else if (req.url === "/setup/save") {
     assert.equal(body.consent, true);
     saved++;
     configured = true;
+    profile = {
+      ...pendingProfile,
+      managed: { enabled: true },
+    };
     data = { available: true, configured, profile };
   } else if (req.url === "/main/prepare" || req.url === "/main/poll") {
     if (req.url === "/main/prepare") starts++;
@@ -131,6 +157,24 @@ try {
     document.querySelector("#setup-status").textContent.includes("认证失败"),
   );
   assert(await page.locator("#setup-help").evaluate((el) => el.open));
+  await page.click("#setup-draft-save");
+  await page.waitForFunction(() =>
+    document
+      .querySelector("#setup-status")
+      .textContent.includes("连接资料已写入本机配置"),
+  );
+  assert.equal(draftSaves, 1);
+  assert.equal(profile.ssh.host, "fail.invalid");
+  assert.equal(profile.managed.setupPending, true);
+  assert.equal(preflights, 1, "Saving must not rerun remote preflight");
+  assert.equal(starts, 0, "Saving a draft must not attempt to connect");
+  await page.reload();
+  await page.waitForURL("**/setup.html");
+  assert.equal(
+    await page.inputValue("#setup-host"),
+    "fail.invalid",
+    "Saved connection draft must survive an app page reload",
+  );
   await page.fill("#setup-host", "linux.example");
   multiple = true;
   await page.click("#setup-probe");
@@ -157,6 +201,58 @@ try {
   await page.waitForURL(app.origin + "/");
   assert.equal(saved, 1);
   assert.equal(starts, 0, "Saving must not start a capture");
+
+  const configuredSetupPage = await browser.newPage();
+  const configuredSetupErrors = [];
+  configuredSetupPage.on("pageerror", (error) =>
+    configuredSetupErrors.push(error.message),
+  );
+  await configuredSetupPage.goto(
+    `${app.origin}/setup.html#token=${encodeURIComponent(app.token)}`,
+  );
+  await configuredSetupPage.waitForFunction(
+    () => document.querySelector("#setup-status").textContent !== "读取配置中…",
+  );
+  assert.equal(
+    await configuredSetupPage.inputValue("#setup-host"),
+    "linux.example",
+    "An existing connection must load its current address before editing",
+  );
+  const preflightsBeforeLocalSave = preflights;
+  const startsBeforeLocalSave = starts;
+  await configuredSetupPage.fill("#setup-host", "192.168.10.231");
+  await configuredSetupPage.click("#setup-draft-save");
+  await configuredSetupPage.waitForFunction(() =>
+    document
+      .querySelector("#setup-status")
+      .textContent.includes("连接资料已写入本机配置"),
+  );
+  assert.equal(profile.ssh.host, "192.168.10.231");
+  assert.equal(configured, false, "Unverified profile must require setup");
+  assert.equal(preflights, preflightsBeforeLocalSave);
+  assert.equal(starts, startsBeforeLocalSave);
+  await configuredSetupPage.reload();
+  await configuredSetupPage.waitForFunction(
+    () => document.querySelector("#setup-status").textContent !== "读取配置中…",
+  );
+  assert.equal(
+    await configuredSetupPage.inputValue("#setup-host"),
+    "192.168.10.231",
+    "Updated address must persist for an already-configured installation",
+  );
+  await configuredSetupPage.click("#setup-probe");
+  await configuredSetupPage.waitForSelector("#setup-result", {
+    state: "visible",
+  });
+  await configuredSetupPage.check("#setup-consent");
+  await configuredSetupPage.click("#setup-save");
+  await configuredSetupPage.waitForURL(app.origin + "/");
+  assert.equal(saved, 2);
+  assert.equal(configured, true);
+  assert.equal(profile.ssh.host, "192.168.10.231");
+  await configuredSetupPage.close();
+  assert.deepEqual(configuredSetupErrors, []);
+
   await page.click("#connect");
   await page.waitForFunction(
     () => document.querySelector("#status").textContent === "已连接",
@@ -182,6 +278,8 @@ try {
     1,
     "Recovery must not duplicate explicit prepare requests",
   );
+  if (await page.locator("#disconnect-report-dialog").isVisible())
+    await page.click("#disconnect-report-close");
   await page.click("#settings-toggle");
   await page.click("#disconnect");
   await page.waitForTimeout(300);
@@ -189,6 +287,7 @@ try {
   const stoppedPolls = polls;
   await page.waitForTimeout(5500);
   assert.equal(polls, stoppedPolls, "User disconnect must cancel recovery");
+
   assert.deepEqual(errors, []);
   console.log(
     "PASS: first-run wizard, SSH error help, read-only preflight, ambiguity/consent gate, save, recovery, explicit stop",

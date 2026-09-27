@@ -217,6 +217,38 @@ try {
     if (style === null) canvas.removeAttribute("style");
     else canvas.setAttribute("style", style);
   }, originalCanvasStyle);
+  const releaseRect = await page.locator("#screen canvas").boundingBox();
+  await page.mouse.move(
+    releaseRect.x + releaseRect.width / 2,
+    releaseRect.y + releaseRect.height / 2,
+  );
+  await page.mouse.down();
+  await page.waitForTimeout(40);
+  assert.equal(mock.events.pointers.at(-1)?.mask, 1, "Mouse-down missing");
+  await page.evaluate(() => window.dispatchEvent(new Event("blur")));
+  await page.waitForTimeout(40);
+  assert.equal(
+    mock.events.pointers.at(-1)?.mask,
+    0,
+    "Window blur must release a held remote mouse button",
+  );
+  await page.mouse.up();
+  await page.mouse.move(
+    releaseRect.x + releaseRect.width / 2,
+    releaseRect.y + releaseRect.height / 2,
+  );
+  await page.mouse.down();
+  await page.waitForTimeout(40);
+  await page.evaluate(() =>
+    window.dispatchEvent(new PointerEvent("pointercancel", { bubbles: true })),
+  );
+  await page.waitForTimeout(40);
+  assert.equal(
+    mock.events.pointers.at(-1)?.mask,
+    0,
+    "Pointer cancellation must release a held remote mouse button",
+  );
+  await page.mouse.up();
   const beforeKeys = mock.events.keys.length;
   await page.keyboard.press("F11");
   await page.keyboard.press("BracketLeft");

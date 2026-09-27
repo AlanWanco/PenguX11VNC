@@ -814,6 +814,7 @@ export async function startServer({
       if (
         [
           "/api/setup/preflight",
+          "/api/setup/draft",
           "/api/setup/save",
           "/api/main/prepare",
           "/api/main/poll",
@@ -838,7 +839,10 @@ export async function startServer({
         if (data.profile) {
           profile = normalizeConnection(data.profile, data.profile.id);
           passwordFile = undefined;
-          if (url.pathname === "/api/setup/save") {
+          if (
+            url.pathname === "/api/setup/save" ||
+            url.pathname === "/api/setup/draft"
+          ) {
             cachedVncPassword = undefined;
             if (rustManager)
               await managerRequest(rustManager, "/credentials", {

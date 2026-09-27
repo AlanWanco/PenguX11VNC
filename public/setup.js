@@ -18,7 +18,6 @@ try {
 history.replaceState(null, "", location.pathname);
 let report;
 let busy = false;
-let configured = false;
 const status = (text) => {
   $("setup-status").textContent = text;
 };
@@ -38,6 +37,19 @@ function formDraft() {
     user: $("setup-user").value,
     key: $("setup-key").value,
     passwordPath: $("setup-password-path").value,
+  };
+}
+function draftRequest() {
+  const draft = formDraft();
+  return {
+    name: draft.name,
+    ssh: {
+      host: draft.host,
+      port: draft.port,
+      user: draft.user,
+      privateKeyFile: draft.key,
+    },
+    remotePasswordFile: draft.passwordPath,
   };
 }
 function saveDraft() {
@@ -207,11 +219,25 @@ $("setup-save").addEventListener("click", async () => {
     updateControls();
   }
 });
-$("setup-draft-save").addEventListener("click", () => {
+$("setup-draft-save").addEventListener("click", async () => {
+  if (busy) return;
+  busy = true;
   saveDraft();
-  status(
-    "已保存本机填写草稿；尚未保存为可连接配置，也没有启动远端服务。修复预检后可继续。",
-  );
+  updateControls();
+  status("正在将连接信息保存到本机配置；不会连接或修改远端…");
+  try {
+    const data = await api("/api/setup/draft", draftRequest());
+    if (!data.savedLocally) throw new Error("本机配置未确认保存");
+    clearDraft();
+    status(
+      "连接资料已写入本机配置并设为当前连接（未验证、未连接，也未修改远端）。现在可直接运行只读预检；是否能连接不会影响保存。",
+    );
+  } catch (error) {
+    status(`本机保存失败：${error.message}。填写内容仍保留在当前页面。`);
+  } finally {
+    busy = false;
+    updateControls();
+  }
 });
 $("setup-back").addEventListener("click", () => {
   location.href = `./#token=${encodeURIComponent(token)}`;
@@ -222,7 +248,6 @@ try {
     throw new Error(
       "首次连接向导需要 Tauri 入口。Chrome 回退入口请按 QUICKSTART.md 编辑配置。",
     );
-  configured = data.configured;
   const p = data.profile || {};
   const profileValues = {
     name: p.name || "Linux QQ",
@@ -232,12 +257,13 @@ try {
     key: p.ssh?.privateKeyFile || "",
     passwordPath: p.vnc?.remotePasswordFile || "",
   };
-  const draft = !data.configured ? readDraft() : null;
+  const draft = !data.configured && !p.ssh ? readDraft() : null;
   applyFormValues(draft || profileValues);
   status(
     draft
-      ? "已恢复上次未完成的本机填写；请重新运行只读预检。"
-      : data.startupError || "配置只会在确认保存时写入。首先运行只读预检。",
+      ? "已恢复上次填写的本机草稿；可先保存连接资料，或运行只读预检。"
+      : data.startupError ||
+          "可以先保存本机连接资料（无需远端连通），也可以直接运行只读预检。",
   );
   updateControls();
 } catch (error) {

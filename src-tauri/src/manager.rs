@@ -1565,7 +1565,14 @@ pub fn load_profile() -> io::Result<Profile> {
         .get(&id)
         .cloned()
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "找不到连接配置"))?;
-    validate_profile(&raw)?;
+    if raw["managed"]["setupPending"] != true {
+        validate_profile(&raw)?;
+    } else if !raw.is_object() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "待预检连接配置格式无效",
+        ));
+    }
     Ok(Profile { id, raw })
 }
 
@@ -2193,6 +2200,11 @@ fn validate_profile(raw: &Value) -> io::Result<()> {
 
 pub fn startup_profile() -> (Profile, bool, Option<String>) {
     match load_profile() {
+        Ok(profile) if profile.raw["managed"]["setupPending"] == true => (
+            profile,
+            false,
+            Some("本机连接资料已保存，远端尚未预检；请使用向导继续。".into()),
+        ),
         Ok(profile) => (profile, true, None),
         Err(_) => (
             onboarding::empty_profile(),
@@ -2294,6 +2306,7 @@ fn handle_request(mut stream: TcpStream, state: Arc<Mutex<ManagerState>>, token:
             .map(|s| s.setup_status())
             .map_err(|_| io::Error::other("manager locked")),
         ("POST", "/setup/preflight")
+        | ("POST", "/setup/draft")
         | ("POST", "/setup/save")
         | ("POST", "/main/prepare")
         | ("POST", "/main/poll") => state
@@ -2301,6 +2314,7 @@ fn handle_request(mut stream: TcpStream, state: Arc<Mutex<ManagerState>>, token:
             .map_err(|_| io::Error::other("manager locked"))
             .and_then(|mut manager| match path.as_str() {
                 "/setup/preflight" => manager.preflight(body),
+                "/setup/draft" => manager.save_setup_draft(body),
                 "/setup/save" => manager.save_setup(body),
                 _ => manager.prepare_main(path == "/main/poll"),
             }),

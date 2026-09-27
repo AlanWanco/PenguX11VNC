@@ -91,7 +91,7 @@ pub(super) fn empty_profile() -> Profile {
     }
 }
 
-fn write_config(profile: &Profile) -> io::Result<()> {
+fn writable_config_path() -> io::Result<PathBuf> {
     let path = config_path();
     if uses_default_config_path() && !path.exists() {
         let legacy = home_path(LEGACY_CONFIG);
@@ -108,7 +108,11 @@ fn write_config(profile: &Profile) -> io::Result<()> {
             }
         }
     }
-    write_config_to(profile, &path)
+    Ok(path)
+}
+
+fn write_config(profile: &Profile) -> io::Result<()> {
+    write_config_to(profile, &writable_config_path()?)
 }
 
 fn write_config_to(profile: &Profile, path: &std::path::Path) -> io::Result<()> {
@@ -124,6 +128,13 @@ fn write_config_to(profile: &Profile, path: &std::path::Path) -> io::Result<()> 
     }
     document["connections"][&profile.id] = profile.raw.clone();
     document["defaultConnection"] = json!(profile.id);
+    document
+        .as_object_mut()
+        .map(|object| object.remove("setupDraft"));
+    write_document_to(&document, path)
+}
+
+fn write_document_to(document: &Value, path: &std::path::Path) -> io::Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::other("配置目录无效"))?;
@@ -170,6 +181,86 @@ fn write_config_to(profile: &Profile, path: &std::path::Path) -> io::Result<()> 
         return Err(error);
     }
     Ok(())
+}
+
+fn setup_profile_from_request(profile: &Profile, body: &Value) -> io::Result<Profile> {
+    fn text(value: Option<&str>, label: &str, max_chars: usize) -> io::Result<String> {
+        let value = value.unwrap_or_default().trim();
+        if value.chars().count() > max_chars || value.chars().any(char::is_control) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{label}格式或长度无效"),
+            ));
+        }
+        Ok(value.to_string())
+    }
+
+    let name = text(body["name"].as_str(), "连接名称", 80)?;
+    let ssh = &body["ssh"];
+    let host = text(ssh["host"].as_str(), "SSH 主机", 255)?;
+    if host.is_empty()
+        || !host
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "_.:-".contains(character))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "SSH 主机或 IP 格式无效；连接失败的地址仍可保存",
+        ));
+    }
+    let user = text(ssh["user"].as_str(), "SSH 用户名", 255)?;
+    if user.is_empty()
+        || !user
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "._-".contains(character))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "SSH 用户名格式无效",
+        ));
+    }
+    let port = match &ssh["port"] {
+        Value::String(value) => value.trim().parse::<u16>().ok(),
+        Value::Number(value) => value.as_u64().and_then(|number| u16::try_from(number).ok()),
+        _ => None,
+    }
+    .filter(|port| *port > 0)
+    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "SSH 端口必须为 1～65535"))?;
+    let private_key = text(ssh["privateKeyFile"].as_str(), "私钥路径", 4096)?;
+    if !private_key.is_empty() && !PathBuf::from(expand_home(&private_key)).is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "私钥路径必须是本机绝对路径；不需要验证文件或 SSH 是否可用",
+        ));
+    }
+    let remote_password_file = text(
+        body["remotePasswordFile"].as_str(),
+        "远端 VNC 密码文件路径",
+        4096,
+    )?;
+    if !remote_password_file.is_empty()
+        && (!(remote_password_file.starts_with('/') || remote_password_file.starts_with("~/"))
+            || !remote_password_file
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || "/_.:-~".contains(character)))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "远端密码文件路径格式无效；不需要检查该文件是否存在",
+        ));
+    }
+
+    let mut draft = profile.clone();
+    draft.raw["name"] = json!(name);
+    draft.raw["ssh"] = json!({
+        "host": host,
+        "user": user,
+        "port": port,
+        "privateKeyFile": private_key
+    });
+    draft.raw["vnc"]["remotePasswordFile"] = json!(remote_password_file);
+    draft.raw["managed"]["setupPending"] = json!(true);
+    Ok(draft)
 }
 
 pub(super) fn probe_command(action: &str, options: &Value) -> String {
@@ -382,6 +473,22 @@ impl ManagerState {
     pub(super) fn setup_status(&self) -> Value {
         json!({"available": true, "configured": self.onboarding.configured,
             "startupError": self.onboarding.startup_error, "profile": self.profile.normalized_json()})
+    }
+
+    pub(super) fn save_setup_draft(&mut self, body: Value) -> io::Result<Value> {
+        if self.onboarding.live.is_some() || !self.children.is_empty() || !self.videos.is_empty() {
+            return Err(io::Error::other("请先断开当前画面会话，再修改连接资料"));
+        }
+        let draft = setup_profile_from_request(&self.profile, &body)?;
+        write_config(&draft)?;
+        self.profile = draft;
+        self.onboarding.configured = false;
+        self.onboarding.startup_error =
+            Some("连接资料已保存到本机；远端尚未验证或连接。可继续运行只读预检。".into());
+        self.onboarding.pending = None;
+        let mut status = self.setup_status();
+        status["savedLocally"] = json!(true);
+        Ok(status)
     }
 
     pub(super) fn preflight(&mut self, body: Value) -> io::Result<Value> {
@@ -606,6 +713,50 @@ mod tests {
         let report =
             json!({"windows": [window("0x20", 10)], "processes": [{"pid": 10, "start": "10"}]});
         assert!(choose_target(&report, Some(&old), None).is_none());
+    }
+
+    #[test]
+    fn local_setup_save_persists_new_host_without_remote_validation() {
+        let profile = Profile {
+            id: "linux-qq".into(),
+            raw: json!({
+                "name": "Old host",
+                "ssh": {"host": "192.168.10.120", "user": "alanwanco", "port": 22},
+                "managed": {"enabled": true, "target": window("0x10", 10)},
+                "window": {"id": "0x10", "display": ":0", "xauthority": "/tmp/auth"}
+            }),
+        };
+        let body = json!({
+            "name": "New host",
+            "ssh": {
+                "host": "192.168.10.231",
+                "user": "alanwanco",
+                "port": "2222",
+                "privateKeyFile": ""
+            },
+            "remotePasswordFile": "/run/user/1000/x11vnc-qq.pass"
+        });
+        let updated = setup_profile_from_request(&profile, &body).unwrap();
+        assert_eq!(updated.raw["ssh"]["host"], "192.168.10.231");
+        assert_eq!(updated.raw["ssh"]["port"], 2222);
+        assert_eq!(updated.raw["managed"]["setupPending"], true);
+        assert_eq!(updated.raw["managed"]["target"]["id"], "0x10");
+
+        let dir = std::env::temp_dir().join(format!("pengux-local-setup-{}", random_token()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("connections.json");
+        write_config_to(&updated, &path).unwrap();
+        let stored: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(stored["defaultConnection"], "linux-qq");
+        assert_eq!(
+            stored["connections"]["linux-qq"]["ssh"]["host"],
+            "192.168.10.231"
+        );
+        assert_eq!(
+            stored["connections"]["linux-qq"]["managed"]["setupPending"],
+            true
+        );
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

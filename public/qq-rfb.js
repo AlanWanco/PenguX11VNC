@@ -24,8 +24,20 @@ export default class QQRFB extends RFB {
     this._frameRate = 30;
     this._frameRateTimer = undefined;
     this._debugPointerAt = 0;
+    this._lastPointerPosition = undefined;
     this._frameRequestInFlight = false;
     this._videoMode = false;
+    this._handleInputInterruption = () => this.resetPointerState();
+    this._handleVisibilityChange = () => {
+      if (document.visibilityState === "hidden") this.resetPointerState();
+    };
+    window.addEventListener("blur", this._handleInputInterruption);
+    window.addEventListener(
+      "pointercancel",
+      this._handleInputInterruption,
+      true,
+    );
+    document.addEventListener("visibilitychange", this._handleVisibilityChange);
   }
 
   get videoMode() {
@@ -157,6 +169,17 @@ export default class QQRFB extends RFB {
   }
 
   disconnect() {
+    this.resetPointerState();
+    window.removeEventListener("blur", this._handleInputInterruption);
+    window.removeEventListener(
+      "pointercancel",
+      this._handleInputInterruption,
+      true,
+    );
+    document.removeEventListener(
+      "visibilitychange",
+      this._handleVisibilityChange,
+    );
     clearTimeout(this._frameRateTimer);
     this._frameRateTimer = undefined;
     this._frameRequestInFlight = false;
@@ -207,7 +230,20 @@ export default class QQRFB extends RFB {
     releaseCapture();
     clearTimeout(this._mouseMoveTimer);
     this._mouseMoveTimer = null;
+    const heldButtons = this._mouseButtonMask || 0;
+    const position = this._lastPointerPosition || this._mousePos;
+    if (
+      heldButtons &&
+      position &&
+      Number.isFinite(position.x) &&
+      Number.isFinite(position.y) &&
+      this._rfbConnectionState === "connected" &&
+      !this._viewOnly
+    ) {
+      this._handleMouseButton(position.x, position.y, 0);
+    }
     this._mouseButtonMask = 0;
+    this._lastPointerPosition = undefined;
     this._debugPointerAt = 0;
     this._viewportDragging = false;
     this._viewportHasMoved = false;
@@ -215,6 +251,7 @@ export default class QQRFB extends RFB {
 
   _sendMouse(x, y, mask) {
     if (this._rfbConnectionState !== "connected" || this._viewOnly) return;
+    this._lastPointerPosition = { x, y };
     if (mask & 0x8000)
       throw new Error(`Illegal mouse button mask (mask: ${mask})`);
 
