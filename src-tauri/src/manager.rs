@@ -2203,7 +2203,7 @@ pub fn startup_profile() -> (Profile, bool, Option<String>) {
         Ok(profile) if profile.raw["managed"]["setupPending"] == true => (
             profile,
             false,
-            Some("本机连接资料已保存，远端尚未预检；请使用向导继续。".into()),
+            Some("本机连接资料已保存；请在向导完成预检和窗口选择后保存完整配置。".into()),
         ),
         Ok(profile) => (profile, true, None),
         Err(_) => (
@@ -2509,7 +2509,7 @@ mod onboarding_http_tests {
         response
     }
     #[test]
-    fn fresh_manager_opens_without_ssh_and_requires_auth_and_consent() {
+    fn fresh_manager_opens_without_ssh_and_requires_auth_and_preflight() {
         let mut manager = ManagerRuntime::start(onboarding::empty_profile(), false, None).unwrap();
         let forbidden = request(&manager, "wrong", "GET", "/setup", "");
         assert!(forbidden.starts_with("HTTP/1.1 403"));
@@ -2519,14 +2519,8 @@ mod onboarding_http_tests {
         assert!(setup.contains("\"configured\":false"));
         let prepare = request(&manager, &manager.token, "POST", "/main/prepare", "{}");
         assert!(prepare.contains("请先使用首次连接向导"));
-        let save = request(
-            &manager,
-            &manager.token,
-            "POST",
-            "/setup/save",
-            "{\"consent\":false}",
-        );
-        assert!(save.contains("请确认仅启动所选"));
+        let save = request(&manager, &manager.token, "POST", "/setup/save", "{}");
+        assert!(save.contains("请先完成预检"));
         manager.stop();
     }
 }

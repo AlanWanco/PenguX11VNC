@@ -885,6 +885,22 @@ body.setup-page {
   align-items: center;
   gap: 16px;
 }
+.setup-card header h1 {
+  margin: 0;
+}
+.setup-back {
+  flex: 0 0 40px;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-color: var(--border);
+  background: #ffffff09;
+  font-size: 24px;
+  line-height: 1;
+}
 .setup-card fieldset,
 .setup-card section,
 .setup-card details {

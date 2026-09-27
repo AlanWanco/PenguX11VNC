@@ -1,7 +1,6 @@
 const $ = (id) => document.getElementById(id);
 const SESSION_TOKEN_KEY = "pengux11vnc-token";
 const SESSION_LEGACY_TOKEN_KEY = "qq-viewer-token";
-const DRAFT_KEY = "pengux11vnc.setup-draft.v1";
 const fragment = new URLSearchParams(location.hash.slice(1));
 let token = fragment.get("token");
 try {
@@ -21,14 +20,6 @@ let busy = false;
 const status = (text) => {
   $("setup-status").textContent = text;
 };
-function readDraft() {
-  try {
-    const value = JSON.parse(localStorage.getItem(DRAFT_KEY) || "null");
-    return value && typeof value === "object" ? value : null;
-  } catch {
-    return null;
-  }
-}
 function formDraft() {
   return {
     name: $("setup-name").value,
@@ -51,20 +42,6 @@ function draftRequest() {
     },
     remotePasswordFile: draft.passwordPath,
   };
-}
-function saveDraft() {
-  try {
-    localStorage.setItem(DRAFT_KEY, JSON.stringify(formDraft()));
-  } catch {
-    /* Draft persistence is optional. */
-  }
-}
-function clearDraft() {
-  try {
-    localStorage.removeItem(DRAFT_KEY);
-  } catch {
-    /* Storage is optional. */
-  }
 }
 function applyFormValues(value) {
   if (!value) return;
@@ -94,38 +71,24 @@ async function api(path, body) {
 function updateControls() {
   $("setup-fields").disabled = busy;
   $("setup-window").disabled = busy;
-  $("setup-consent").disabled = busy;
   $("setup-recover").disabled = busy;
   $("setup-back").disabled = busy;
-  $("setup-draft-save").disabled = busy;
-  $("setup-save").disabled =
-    busy ||
-    !report?.x11vnc ||
-    !report?.passwordReady ||
-    !$("setup-window").value ||
-    !$("setup-consent").checked;
+  $("setup-save").disabled = busy;
 }
 function invalidate() {
   report = undefined;
   $("setup-result").hidden = true;
-  $("setup-consent").checked = false;
   status("配置已修改，请重新预检；尚未保存。");
   updateControls();
 }
-$("setup-fields").addEventListener("input", () => {
-  saveDraft();
-  invalidate();
-});
+$("setup-fields").addEventListener("input", invalidate);
 $("setup-window").addEventListener("change", updateControls);
-$("setup-consent").addEventListener("change", updateControls);
 $("setup-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   if (busy) return;
   busy = true;
-  saveDraft();
   report = undefined;
   $("setup-result").hidden = true;
-  $("setup-consent").checked = false;
   updateControls();
   status("正在通过 SSH 只读检查，通常需要数秒…");
   try {
@@ -179,7 +142,7 @@ $("setup-form").addEventListener("submit", async (event) => {
     $("setup-help").open = !ready;
     status(
       ready
-        ? "预检完成。请核对窗口与授权范围，再保存。尚未启动远端服务。"
+        ? "预检完成。确认所选 QQ 窗口后，点击唯一的“保存配置并返回首页”按钮。尚未启动远端服务。"
         : `预检完成，但还有待处理项目。${
             report.passwordReady
               ? "按下方引导准备远端后重新预检。"
@@ -201,39 +164,31 @@ $("setup-form").addEventListener("submit", async (event) => {
 });
 $("setup-save").addEventListener("click", async () => {
   if (busy || $("setup-save").disabled) return;
+  if (!$("setup-form").reportValidity()) return;
   busy = true;
   updateControls();
-  status("正在重新核对窗口并备份、保存本机配置…");
+  const selectedWindow = $("setup-window").value;
+  const canSaveVerifiedProfile =
+    report?.x11vnc && report?.passwordReady && selectedWindow;
+  status(
+    canSaveVerifiedProfile
+      ? "正在重新核对所选窗口并保存完整配置…"
+      : "正在备份并保存本机连接资料…",
+  );
   try {
-    await api("/api/setup/save", {
-      windowKey: $("setup-window").value,
-      consent: $("setup-consent").checked,
-      autoRecover: $("setup-recover").checked,
-    });
-    clearDraft();
+    const data = canSaveVerifiedProfile
+      ? await api("/api/setup/save", {
+          windowKey: selectedWindow,
+          autoRecover: $("setup-recover").checked,
+        })
+      : await api("/api/setup/draft", draftRequest());
+    if (canSaveVerifiedProfile && !data.configured)
+      throw new Error("完整连接配置未确认保存");
+    if (!canSaveVerifiedProfile && !data.savedLocally)
+      throw new Error("本机连接资料未确认保存");
     location.href = `./#token=${encodeURIComponent(token)}`;
   } catch (error) {
-    status(error.message);
-  } finally {
-    busy = false;
-    updateControls();
-  }
-});
-$("setup-draft-save").addEventListener("click", async () => {
-  if (busy) return;
-  busy = true;
-  saveDraft();
-  updateControls();
-  status("正在将连接信息保存到本机配置；不会连接或修改远端…");
-  try {
-    const data = await api("/api/setup/draft", draftRequest());
-    if (!data.savedLocally) throw new Error("本机配置未确认保存");
-    clearDraft();
-    status(
-      "连接资料已写入本机配置并设为当前连接（未验证、未连接，也未修改远端）。现在可直接运行只读预检；是否能连接不会影响保存。",
-    );
-  } catch (error) {
-    status(`本机保存失败：${error.message}。填写内容仍保留在当前页面。`);
+    status(`保存失败：${error.message}。填写内容仍保留在当前页面。`);
   } finally {
     busy = false;
     updateControls();
@@ -257,13 +212,10 @@ try {
     key: p.ssh?.privateKeyFile || "",
     passwordPath: p.vnc?.remotePasswordFile || "",
   };
-  const draft = !data.configured && !p.ssh ? readDraft() : null;
-  applyFormValues(draft || profileValues);
+  applyFormValues(profileValues);
   status(
-    draft
-      ? "已恢复上次填写的本机草稿；可先保存连接资料，或运行只读预检。"
-      : data.startupError ||
-          "可以先保存本机连接资料（无需远端连通），也可以直接运行只读预检。",
+    data.startupError ||
+      "填写连接资料后运行只读预检；点击唯一的保存按钮即可保存并返回首页。",
   );
   updateControls();
 } catch (error) {

@@ -1,4 +1,4 @@
-//! Guided connection state. All remote writes are behind explicit serve consent.
+//! Guided connection state. Remote VNC startup requires consent at connection time.
 use super::*;
 use std::fs::OpenOptions;
 
@@ -484,7 +484,7 @@ impl ManagerState {
         self.profile = draft;
         self.onboarding.configured = false;
         self.onboarding.startup_error =
-            Some("连接资料已保存到本机；远端尚未验证或连接。可继续运行只读预检。".into());
+            Some("连接资料已保存到本机；完整连接配置尚未就绪。请继续预检并确认 QQ 窗口。".into());
         self.onboarding.pending = None;
         let mut status = self.setup_status();
         status["savedLocally"] = json!(true);
@@ -524,9 +524,6 @@ impl ManagerState {
     }
 
     pub(super) fn save_setup(&mut self, body: Value) -> io::Result<Value> {
-        if body["consent"] != true {
-            return Err(io::Error::other("请确认仅启动所选 QQ 的本机 VNC 服务"));
-        }
         let (mut draft, report) = self
             .onboarding
             .pending

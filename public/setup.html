@@ -12,12 +12,21 @@
   <body class="setup-page">
     <article class="setup-card">
       <header>
+        <button
+          id="setup-back"
+          class="setup-back"
+          type="button"
+          aria-label="返回首页，不保存修改"
+          title="返回首页（不保存修改）"
+        >
+          ←
+        </button>
         <img src="./icon.svg" width="48" height="48" alt="" />
         <h1>连接你的 Linux QQ</h1>
       </header>
       <p>
-        本机配置 SSH → 只读预检 → 选择 QQ 主窗口 → 保存并连接。不会启动第二个
-        QQ，不捕获整个桌面。
+        填写本机 SSH 资料；只读预检用于选择 QQ
+        窗口。点击下方唯一的保存按钮写入本机配置并返回首页；不会自动连接或启动远端服务。
       </p>
       <p id="setup-status" role="status" aria-live="polite">读取配置中…</p>
       <form id="setup-form">
@@ -106,18 +115,6 @@
           <button type="submit" id="setup-probe" class="primary setup-action">
             2 · 运行只读预检
           </button>
-          <button
-            type="button"
-            id="setup-draft-save"
-            class="secondary setup-action"
-          >
-            保存连接资料（仅本机）
-          </button>
-          <p class="help">
-            不需要 SSH、QQ
-            或密码文件预检即可保存到本机当前连接配置；保存前会备份原配置。此操作不会访问远端或启动
-            VNC。保存后需完成预检和授权才能连接。
-          </p>
           <p class="help">
             预检只读取当前用户 QQ 进程及 X11
             窗口元数据、依赖状态和密码文件权限；不读取聊天文字、截图或剪贴板，不安装软件、不启动服务。
@@ -146,15 +143,16 @@
           只自动恢复到同一 QQ
           可执行文件、类名和实例名下唯一的普通窗口；有歧义时暂停并要求重新选择。恢复只在本次点击连接后有效，主动断开会停止。
         </p>
-        <label class="setup-checkbox"
-          ><input id="setup-consent" type="checkbox" />允许连接时通过 SSH
-          为所选窗口启动仅监听 localhost 的
-          x11vnc，并在断开时清理本工具创建的进程；不接管已有 VNC 服务。</label
-        >
-        <button id="setup-save" class="primary setup-action" disabled>
-          4 · 保存配置，返回连接
-        </button>
       </section>
+      <button id="setup-save" class="primary setup-action" type="button">
+        保存配置并返回首页
+      </button>
+      <p class="help">
+        这是本页唯一的保存按钮。若本次预检通过且已选中 QQ
+        窗口，会保存完整连接配置；否则只保存 SSH
+        连接资料，首页会提示继续预检。两种情况都只写本机配置、不启动远端服务。点击首页“连接窗口”时，软件会再明确询问是否允许启动远端单窗口
+        VNC。
+      </p>
       <details id="setup-help">
         <summary>远端缺少依赖、看不到 QQ 或不知道怎么准备？</summary>
         <h3>在远端做一次准备（不会自动执行）</h3>
@@ -212,7 +210,6 @@ chmod 600 ~/.config/pengux11vnc/vnc.pass</pre>
         ~/.config/pengux11vnc/connections.json。保存前备份原文件；令牌、密码、私钥不写入此配置。当前仍需要系统
         OpenSSH；安装包已内置 Node.js。
       </p>
-      <button id="setup-back">返回首页（不保存）</button>
     </article>
   </body>
 </html>

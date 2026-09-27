@@ -81,7 +81,6 @@ const manager = http.createServer(async (req, res) => {
       };
     }
   } else if (req.url === "/setup/save") {
-    assert.equal(body.consent, true);
     saved++;
     configured = true;
     profile = {
@@ -149,31 +148,41 @@ try {
   );
   assert.equal(childMutation.status, 403);
   await page.goto(app.url);
+  await page.waitForSelector("#setup-open", { state: "visible" });
+  assert(
+    await page.isDisabled("#connect"),
+    "Unconfigured profiles cannot connect",
+  );
+  await page.click("#setup-open");
   await page.waitForURL("**/setup.html");
-  assert.equal(starts, 0, "First run must not start SSH/VNC");
+  assert.equal(starts, 0, "Opening setup must not start SSH/VNC");
   await page.fill("#setup-host", "fail.invalid");
   await page.click("#setup-probe");
   await page.waitForFunction(() =>
     document.querySelector("#setup-status").textContent.includes("认证失败"),
   );
   assert(await page.locator("#setup-help").evaluate((el) => el.open));
-  await page.click("#setup-draft-save");
-  await page.waitForFunction(() =>
-    document
-      .querySelector("#setup-status")
-      .textContent.includes("连接资料已写入本机配置"),
-  );
+  await page.click("#setup-save");
+  await page.waitForURL(app.origin + "/");
   assert.equal(draftSaves, 1);
   assert.equal(profile.ssh.host, "fail.invalid");
   assert.equal(profile.managed.setupPending, true);
   assert.equal(preflights, 1, "Saving must not rerun remote preflight");
   assert.equal(starts, 0, "Saving a draft must not attempt to connect");
+  assert(await page.isDisabled("#connect"));
+  assert.equal(await page.textContent("#setup-open"), "继续设置连接");
   await page.reload();
+  assert.equal(
+    new URL(page.url()).pathname,
+    "/",
+    "Saved drafts must not redirect-loop",
+  );
+  await page.click("#setup-open");
   await page.waitForURL("**/setup.html");
   assert.equal(
     await page.inputValue("#setup-host"),
     "fail.invalid",
-    "Saved connection draft must survive an app page reload",
+    "Saved connection draft must survive navigation and reload",
   );
   await page.fill("#setup-host", "linux.example");
   multiple = true;
@@ -185,7 +194,10 @@ try {
     "Ambiguous windows must require selection",
   );
   await page.selectOption("#setup-window", "0");
-  assert(await page.isDisabled("#setup-save"), "Consent is required");
+  assert(
+    await page.isEnabled("#setup-save"),
+    "Saving must not require connection consent",
+  );
   assert.equal(starts, 0, "Preflight must remain read-only");
   await page.fill("#setup-name", "Changed");
   assert(
@@ -196,7 +208,6 @@ try {
   await page.click("#setup-probe");
   await page.waitForSelector("#setup-result", { state: "visible" });
   assert.equal(await page.inputValue("#setup-window"), "0");
-  await page.check("#setup-consent");
   await page.click("#setup-save");
   await page.waitForURL(app.origin + "/");
   assert.equal(saved, 1);
@@ -220,21 +231,42 @@ try {
   );
   const preflightsBeforeLocalSave = preflights;
   const startsBeforeLocalSave = starts;
+  await configuredSetupPage.fill("#setup-host", "unsaved.invalid");
+  await configuredSetupPage.click("#setup-back");
+  await configuredSetupPage.waitForURL(app.origin + "/");
+  assert.equal(
+    profile.ssh.host,
+    "linux.example",
+    "Back must discard unsaved edits",
+  );
+  await configuredSetupPage.click("#setup-open");
+  await configuredSetupPage.waitForURL("**/setup.html");
+  assert.equal(
+    await configuredSetupPage.inputValue("#setup-host"),
+    "linux.example",
+  );
+
   await configuredSetupPage.fill("#setup-host", "192.168.10.231");
-  await configuredSetupPage.click("#setup-draft-save");
-  await configuredSetupPage.waitForFunction(() =>
-    document
-      .querySelector("#setup-status")
-      .textContent.includes("连接资料已写入本机配置"),
+  await configuredSetupPage.click("#setup-save");
+  await configuredSetupPage.waitForURL(app.origin + "/");
+  assert.equal(
+    draftSaves,
+    2,
+    "The single save action persists unverified edits",
   );
   assert.equal(profile.ssh.host, "192.168.10.231");
   assert.equal(configured, false, "Unverified profile must require setup");
   assert.equal(preflights, preflightsBeforeLocalSave);
   assert.equal(starts, startsBeforeLocalSave);
-  await configuredSetupPage.reload();
-  await configuredSetupPage.waitForFunction(
-    () => document.querySelector("#setup-status").textContent !== "读取配置中…",
+  assert(await configuredSetupPage.isDisabled("#connect"));
+  assert.equal(
+    await configuredSetupPage.textContent("#setup-open"),
+    "继续设置连接",
   );
+  await configuredSetupPage.reload();
+  assert.equal(new URL(configuredSetupPage.url()).pathname, "/");
+  await configuredSetupPage.click("#setup-open");
+  await configuredSetupPage.waitForURL("**/setup.html");
   assert.equal(
     await configuredSetupPage.inputValue("#setup-host"),
     "192.168.10.231",
@@ -244,7 +276,6 @@ try {
   await configuredSetupPage.waitForSelector("#setup-result", {
     state: "visible",
   });
-  await configuredSetupPage.check("#setup-consent");
   await configuredSetupPage.click("#setup-save");
   await configuredSetupPage.waitForURL(app.origin + "/");
   assert.equal(saved, 2);
@@ -253,6 +284,13 @@ try {
   await configuredSetupPage.close();
   assert.deepEqual(configuredSetupErrors, []);
 
+  page.once("dialog", (dialog) => void dialog.dismiss());
+  await page.click("#connect");
+  assert.equal(starts, 0, "Canceling connection consent must not start VNC");
+  page.once("dialog", (dialog) => void dialog.accept());
+  await page.waitForFunction(
+    () => document.querySelector("#setup-open").textContent === "编辑连接配置",
+  );
   await page.click("#connect");
   await page.waitForFunction(
     () => document.querySelector("#status").textContent === "已连接",
@@ -290,7 +328,7 @@ try {
 
   assert.deepEqual(errors, []);
   console.log(
-    "PASS: first-run wizard, SSH error help, read-only preflight, ambiguity/consent gate, save, recovery, explicit stop",
+    "PASS: single save action, discard navigation, pending-profile home, read-only preflight, connection consent, recovery, explicit stop",
   );
 } finally {
   await browser.close();

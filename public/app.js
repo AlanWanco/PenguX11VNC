@@ -48,6 +48,9 @@ let replayingClipboardPasteShortcut = false;
 let remoteFilePasteSignature;
 let token;
 let setupAvailable = false;
+let setupConfigured = true;
+let setupManaged = false;
+let connectionConsentGranted = false;
 let connectionWanted = false;
 let recoveryTimer;
 let recoveryEpoch = 0;
@@ -919,9 +922,17 @@ async function loadSessionInfo() {
     $("setup-edit").hidden = !setupAvailable;
     if (setupAvailable) {
       const setupResponse = await api("/api/setup");
-      if (setupResponse.ok && !(await setupResponse.json()).configured) {
-        location.replace(`./setup.html#token=${encodeURIComponent(token)}`);
-        return;
+      if (setupResponse.ok) {
+        const setup = await setupResponse.json();
+        setupConfigured = setup.configured === true;
+        setupManaged = setup.profile?.managed?.enabled === true;
+        $("setup-open").textContent = setupConfigured
+          ? "编辑连接配置"
+          : "继续设置连接";
+        $("connect").disabled = !setupConfigured;
+        $("welcome-hint").textContent = setupConfigured
+          ? ""
+          : setup.startupError || "连接资料尚未完成预检，请继续设置后再连接。";
       }
     }
     remoteWindowId = data.session?.windowId;
@@ -2288,6 +2299,21 @@ function setInteractive() {
 async function connect(prepare = true) {
   await sessionReady;
   if (rfb || connecting) return;
+  if (setupAvailable && !setupConfigured) {
+    toast("连接资料尚未完成预检，请先继续设置连接。");
+    return;
+  }
+  if (!token) {
+    toast("请使用“启动 PenguX11VNC.command”打开，获取本次本地访问凭证。");
+    return;
+  }
+  if (setupAvailable && setupManaged && prepare && !connectionConsentGranted) {
+    const allowed = window.confirm(
+      "现在将通过 SSH 为所选 QQ 窗口启动仅监听远端 localhost 的 x11vnc，并在断开时清理本工具启动的服务。是否继续？",
+    );
+    if (!allowed) return;
+    connectionConsentGranted = true;
+  }
   if (isTauriShell() && isMainSession) {
     const width = Math.round(window.innerWidth);
     const height = Math.round(window.innerHeight);
@@ -2299,10 +2325,6 @@ async function connect(prepare = true) {
       pendingTauriWindowSize = { width, height };
     else pendingTauriWindowSize = undefined;
     disconnectedTauriWindowResized = false;
-  }
-  if (!token) {
-    toast("请使用“启动 PenguX11VNC.command”打开，获取本次本地访问凭证。");
-    return;
   }
   connecting = true;
   const attempt = ++connectEpoch;
@@ -2517,6 +2539,7 @@ async function connect(prepare = true) {
       }
     });
   } catch (error) {
+    connectionConsentGranted = false;
     state("未连接", "disconnected");
     $("connection-method").textContent = "未连接";
     $("video-status").textContent = "连接方式可在主页选择。";
@@ -2621,6 +2644,7 @@ async function cleanupOpenedChildSessions() {
 }
 async function stopMainConnection() {
   const client = rfb;
+  connectionConsentGranted = false;
   manualDisconnectPending = Boolean(client);
   void stopVideoStream();
   connectEpoch++;
@@ -2644,7 +2668,8 @@ async function stopMainConnection() {
 }
 async function openSetup() {
   try {
-    await stopMainConnection();
+    if (connected || connecting || connectionWanted || rfb)
+      await stopMainConnection();
     location.href = `./setup.html#token=${encodeURIComponent(token)}`;
   } catch {
     toast("无法停止当前会话，请稍后重试。");
