@@ -2,9 +2,14 @@ import QQRFB from "./qq-rfb.js";
 import { ImeOverlay } from "./ime-overlay.js";
 import {
   buildDisconnectReport,
+  classifyDisconnectReason,
   sanitizeDiagnosticEvent,
 } from "./disconnect-report.js";
 import { videoStreamOverrides } from "./video-settings.js";
+import {
+  shouldFailDisconnectedVideoPeer,
+  VIDEO_DISCONNECT_GRACE_MS,
+} from "./video-state.js";
 
 const $ = (id) => document.getElementById(id);
 let rfb;
@@ -2199,15 +2204,12 @@ async function startVideoStream() {
       );
     else if (peer.connectionState === "disconnected")
       setTimeout(() => {
-        if (
-          videoPeer === peer &&
-          ["failed", "disconnected"].includes(peer.connectionState)
-        )
+        if (shouldFailDisconnectedVideoPeer(peer, videoPeer))
           void failVideoStream(
-            new Error("WebRTC 连接断开"),
+            new Error("WebRTC 连接持续断开"),
             `${peer.connectionState}/${peer.iceConnectionState}`,
           );
-      }, 1500);
+      }, VIDEO_DISCONNECT_GRACE_MS);
   });
   peer.addEventListener("iceconnectionstatechange", () => logPeerState("ice"));
   peer.addEventListener("signalingstatechange", () =>
@@ -2512,11 +2514,11 @@ async function connect(prepare = true) {
         showDisconnectReport({
           transport: disconnectedMode,
           clean: event.detail.clean,
-          reason: failure
-            ? "video-stream-failure"
-            : event.detail.clean
-              ? "remote-closed-connection"
-              : "unexpected-disconnect",
+          reason: classifyDisconnectReason({
+            videoFailure: Boolean(failure),
+            socketCloseCode: socketClose.code,
+            clean: event.detail.clean,
+          }),
           videoFailure: failureDetails,
         });
       if (showReport && disconnectedMode === "video")

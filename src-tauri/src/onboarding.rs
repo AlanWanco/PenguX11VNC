@@ -1,5 +1,6 @@
 //! Guided connection state. Remote VNC startup requires consent at connection time.
 use super::*;
+use crate::process::CommandSpawnExt;
 use std::fs::OpenOptions;
 
 pub(super) const PROBE: &str = include_str!("../../tools/remote-session.py");
@@ -419,7 +420,7 @@ fn spawn_main(profile: &Profile, target: &Value, report: &Value) -> io::Result<L
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .spawn()?;
+        .spawn_managed()?;
     if let Some(stdin) = remote.stdin.as_mut() {
         if let Err(error) = stdin.write_all(&probe_stdin()).and_then(|()| stdin.flush()) {
             let _ = remote.kill();
@@ -463,7 +464,7 @@ fn spawn_main(profile: &Profile, target: &Value, report: &Value) -> io::Result<L
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .spawn()?,
+            .spawn_managed()?,
     );
     wait_for_rfb(live.port, Duration::from_secs(10))?;
     Ok(live)

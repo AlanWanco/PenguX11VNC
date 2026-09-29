@@ -1,11 +1,13 @@
 mod clipboard_image;
 mod manager;
+mod process;
 mod tray;
 
 use manager::{
     hidden_command, startup_profile, ClipboardUploadResult, ManagerRuntime, Profile,
     CLIPBOARD_FILE_LIMIT,
 };
+use process::CommandSpawnExt;
 use serde_json::json;
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
@@ -891,7 +893,7 @@ fn start_node(
         }
     }
 
-    let mut child = command.spawn()?;
+    let mut child = command.spawn_managed()?;
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
     loop {
         if let Some(status) = child.try_wait()? {
@@ -919,6 +921,25 @@ fn start_node(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Register first so duplicate launches are intercepted before app setup.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            let app = app.clone();
+            thread::spawn(move || {
+                // The first process may still be creating its main window when
+                // the second process reports the launch. Retry briefly rather
+                // than losing the activation request.
+                for _ in 0..100 {
+                    if app.get_webview_window("main").is_some() {
+                        if let Err(error) = tray::restore_main(&app) {
+                            eprintln!("无法唤起已运行的主窗口：{error}");
+                        }
+                        return;
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
+                eprintln!("未能在 10 秒内找到已运行实例的主窗口");
+            });
+        }))
         .manage(MainWindowAspect::default())
         .invoke_handler(tauri::generate_handler![
             set_main_window_aspect,

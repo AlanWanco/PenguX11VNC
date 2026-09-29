@@ -3,6 +3,7 @@ mod onboarding;
 use onboarding::Onboarding;
 
 use crate::clipboard_image::{ClipboardImageSync, StatusCallback, REMOTE_FRAME_PYTHON};
+use crate::process::CommandSpawnExt;
 
 use rand::random;
 use serde::{Deserialize, Serialize};
@@ -548,14 +549,18 @@ struct ChildSession {
 
 struct VideoSession {
     child: Child,
-    stdin: ChildStdin,
+    stdin: Option<ChildStdin>,
     messages: Receiver<String>,
 }
 
 impl Drop for VideoSession {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        if let Err(error) = stop_video_worker(&mut self.child, &mut self.stdin) {
+            debug_log(
+                "video-stop-forced",
+                format!("pid={} error={:?}", self.child.id(), error.kind()),
+            );
+        }
     }
 }
 
@@ -769,7 +774,7 @@ impl ManagerState {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .spawn()?;
+            .spawn_managed()?;
         if let Err(error) = wait_for_rfb(local_port, Duration::from_secs(8)) {
             let _ = tunnel.kill();
             let _ = tunnel.wait();
@@ -906,10 +911,14 @@ impl ManagerState {
             stop_video_session(previous);
         }
         let mut session = spawn_video_session(&self.profile, &options)?;
-        if let Err(error) = write_video_command(
-            &mut session.stdin,
-            &json!({ "action": "offer", "type": "offer", "sdp": sdp }),
-        ) {
+        let offer_result = match session.stdin.as_mut() {
+            Some(stdin) => write_video_command(
+                stdin,
+                &json!({ "action": "offer", "type": "offer", "sdp": sdp }),
+            ),
+            None => Err(io::Error::other("远端视频输入通道已关闭")),
+        };
+        if let Err(error) = offer_result {
             stop_video_session(session);
             return Err(error);
         }
@@ -1237,7 +1246,7 @@ fn scp_clipboard_file(profile: &Profile, local: &Path, remote: &str) -> io::Resu
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
-        .spawn()
+        .spawn_managed()
         .map_err(|error| {
             if error.kind() == io::ErrorKind::NotFound {
                 io::Error::new(
@@ -1299,7 +1308,7 @@ pub(crate) fn spawn_remote_clipboard_image_watch(profile: &Profile) -> io::Resul
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .spawn()
+        .spawn_managed()
 }
 
 pub(crate) fn send_remote_clipboard_image(
@@ -1325,7 +1334,7 @@ pub(crate) fn send_remote_clipboard_image(
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn()?;
+        .spawn_managed()?;
     let stdin = child
         .stdin
         .take()
@@ -1589,7 +1598,7 @@ pub fn start_main_tunnel(profile: &Profile) -> io::Result<Option<Child>> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn()?;
+        .spawn_managed()?;
     if let Err(error) = wait_for_rfb(profile.local_port(), Duration::from_secs(10)) {
         let _ = child.kill();
         let _ = child.wait();
@@ -1614,7 +1623,7 @@ fn spawn_window_watch(profile: &Profile) -> io::Result<(Child, ChildStdin, Child
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .spawn()?;
+        .spawn_managed()?;
     let Some(mut stdin) = child.stdin.take() else {
         let _ = child.kill();
         let _ = child.wait();
@@ -1783,7 +1792,7 @@ fn spawn_video_session(profile: &Profile, options: &Value) -> io::Result<VideoSe
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .spawn()?;
+        .spawn_managed()?;
     let Some(mut stdin) = child.stdin.take() else {
         let _ = child.kill();
         let _ = child.wait();
@@ -1811,7 +1820,7 @@ fn spawn_video_session(profile: &Profile, options: &Value) -> io::Result<VideoSe
     });
     Ok(VideoSession {
         child,
-        stdin,
+        stdin: Some(stdin),
         messages,
     })
 }
@@ -1822,10 +1831,43 @@ fn write_video_command(stdin: &mut ChildStdin, command: &Value) -> io::Result<()
     stdin.flush()
 }
 
-fn stop_video_session(mut session: VideoSession) {
-    let _ = write_video_command(&mut session.stdin, &json!({"action": "stop"}));
-    let _ = session.child.kill();
-    let _ = session.child.wait();
+fn stop_video_session(session: VideoSession) {
+    drop(session);
+}
+
+fn stop_video_worker(
+    child: &mut Child,
+    stdin: &mut Option<ChildStdin>,
+) -> io::Result<std::process::ExitStatus> {
+    if let Some(stdin) = stdin.as_mut() {
+        let _ = write_video_command(stdin, &json!({"action": "stop"}));
+    }
+    // Closing SSH stdin is the fallback signal: remote-session.py watches EOF
+    // and tears down its GStreamer pipeline in `finally`.
+    drop(stdin.take());
+
+    let deadline = Instant::now() + Duration::from_secs(4);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(50));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "remote video worker did not stop gracefully",
+                ));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        }
+    }
 }
 
 fn kill_remote_vnc_process(profile: &Profile, remote_pid: u32) {
@@ -1958,7 +2000,7 @@ fn run_ssh_inner(
         } else {
             Stdio::null()
         })
-        .spawn()
+        .spawn_managed()
         .map_err(|error| {
             if input.is_some() {
                 io::Error::new(
@@ -2243,7 +2285,7 @@ fn stream_ime(mut stream: TcpStream, state: Arc<Mutex<ManagerState>>) {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .spawn();
+        .spawn_managed();
     let Ok(mut child) = child else {
         return;
     };
@@ -2619,5 +2661,29 @@ mod video_option_tests {
         let unlimited = state.video_options(&json!({"fps": 0, "bitrateKbps": 50_000}));
         assert_eq!(unlimited["fps"], 60);
         assert_eq!(unlimited["bitrate"], 20_000_000);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod video_shutdown_tests {
+    use super::*;
+
+    #[test]
+    fn video_worker_receives_stop_before_ssh_stdin_closes() {
+        let mut command = Command::new("sh");
+        command
+            .args([
+                "-c",
+                r#"IFS= read -r action || exit 41; [ "$action" = '{"action":"stop"}' ]"#,
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child = command.spawn_managed().unwrap();
+        let mut stdin = child.stdin.take();
+
+        let status = stop_video_worker(&mut child, &mut stdin).unwrap();
+        assert!(status.success(), "worker did not receive the stop message");
+        assert!(stdin.is_none(), "SSH stdin must be closed after stop");
     }
 }

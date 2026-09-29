@@ -1,3 +1,13 @@
+export function classifyDisconnectReason({
+  videoFailure = false,
+  socketCloseCode,
+  clean = false,
+} = {}) {
+  if (videoFailure) return "video-stream-failure";
+  if (socketCloseCode === 1011) return "vnc-tunnel-failure";
+  return clean ? "remote-closed-connection" : "unexpected-disconnect";
+}
+
 const eventFields = Object.freeze({
   "connect-attempt": ["mode"],
   "vnc-connect": ["child"],

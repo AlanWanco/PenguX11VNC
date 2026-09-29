@@ -2,8 +2,28 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   buildDisconnectReport,
+  classifyDisconnectReason,
   sanitizeDiagnosticEvent,
 } from "../public/disconnect-report.js";
+
+test("disconnect classification distinguishes a broken VNC tunnel", () => {
+  assert.equal(
+    classifyDisconnectReason({ socketCloseCode: 1011, clean: true }),
+    "vnc-tunnel-failure",
+  );
+  assert.equal(
+    classifyDisconnectReason({ videoFailure: true, socketCloseCode: 1011 }),
+    "video-stream-failure",
+  );
+  assert.equal(
+    classifyDisconnectReason({ clean: true, socketCloseCode: 1000 }),
+    "remote-closed-connection",
+  );
+  assert.equal(
+    classifyDisconnectReason({ clean: false, socketCloseCode: 1006 }),
+    "unexpected-disconnect",
+  );
+});
 
 test("disconnect events retain only safe, useful diagnostics", () => {
   const event = sanitizeDiagnosticEvent(
