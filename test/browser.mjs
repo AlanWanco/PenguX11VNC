@@ -568,3 +568,6 @@ try {
   await mock.close();
   await rm(settingsDirectory, { recursive: true, force: true });
 }
+
+// Include the managed connection/consent path in the CI browser suite too.
+await import("./onboarding-browser.mjs");

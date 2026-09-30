@@ -15,19 +15,26 @@ pub(super) struct Onboarding {
 }
 
 struct LiveMain {
-    remote: Option<Child>,
-    tunnel: Option<Child>,
+    remote: Option<DiagnosticChild>,
+    tunnel: Option<DiagnosticChild>,
     target: Value,
     port: u16,
+    cleanup_reason: &'static str,
 }
 
 impl Drop for LiveMain {
     fn drop(&mut self) {
+        diagnostics::log(
+            "main-cleanup",
+            json!({"reason": self.cleanup_reason, "localPort": self.port}),
+        );
         if let Some(mut tunnel) = self.tunnel.take() {
+            tunnel.request_stop(self.cleanup_reason);
             let _ = tunnel.kill();
             let _ = tunnel.wait();
         }
         if let Some(mut remote) = self.remote.take() {
+            remote.request_stop(self.cleanup_reason);
             // EOF on SSH stdin tells our supervisor to terminate ONLY its child.
             remote.stdin.take();
             let deadline = Instant::now() + Duration::from_secs(4);
@@ -53,8 +60,10 @@ impl Onboarding {
             generation: 0,
         }
     }
-    pub fn stop(&mut self) {
-        self.live.take();
+    pub fn stop(&mut self, reason: &'static str) {
+        if let Some(mut live) = self.live.take() {
+            live.cleanup_reason = reason;
+        }
     }
 
     pub(super) fn activate_main(&mut self) -> io::Result<bool> {
@@ -419,8 +428,7 @@ fn spawn_main(profile: &Profile, target: &Value, report: &Value) -> io::Result<L
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn_managed()?;
+        .spawn_diagnostic("main-supervisor")?;
     if let Some(stdin) = remote.stdin.as_mut() {
         if let Err(error) = stdin.write_all(&probe_stdin()).and_then(|()| stdin.flush()) {
             let _ = remote.kill();
@@ -447,6 +455,7 @@ fn spawn_main(profile: &Profile, target: &Value, report: &Value) -> io::Result<L
         tunnel: None,
         target: target.clone(),
         port: local_port,
+        cleanup_reason: "startup-failed",
     };
     let line = rx
         .recv_timeout(Duration::from_secs(15))
@@ -463,10 +472,14 @@ fn spawn_main(profile: &Profile, target: &Value, report: &Value) -> io::Result<L
             .args(ssh_args(profile, Some((live.port, remote_port)), true)?)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn_managed()?,
+            .spawn_diagnostic("main-tunnel")?,
     );
     wait_for_rfb(live.port, Duration::from_secs(10))?;
+    live.cleanup_reason = "drop-fallback";
+    diagnostics::log(
+        "main-ready",
+        json!({"localPort": live.port, "remotePort": remote_port, "supervisorPid": live.remote.as_ref().map(DiagnosticChild::id), "tunnelPid": live.tunnel.as_ref().map(DiagnosticChild::id)}),
+    );
     Ok(live)
 }
 
@@ -559,7 +572,7 @@ impl ManagerState {
         draft.raw["children"] = json!({"enabled": true, "minWidth": 80, "minHeight": 60});
         validate_profile(&draft.raw)?;
         write_config(&draft)?;
-        self.cleanup_all();
+        self.cleanup_all("config-save");
         self.profile = draft;
         self.onboarding.configured = true;
         self.onboarding.startup_error = None;
@@ -578,6 +591,7 @@ impl ManagerState {
                     tunnel: start_main_tunnel(&self.profile)?,
                     target: Value::Null,
                     port: self.profile.local_port(),
+                    cleanup_reason: "drop-fallback",
                 });
             }
             return Ok(
@@ -600,27 +614,48 @@ impl ManagerState {
             });
         let target = choose_target(&report, previous, Some(&self.profile.window_id()));
         let Some(target) = target else {
-            self.cleanup_all();
+            self.cleanup_all("target-unavailable");
             return Ok(
                 json!({"state": if !main_candidates(&report).is_empty() { "choose-window" }
                 else if report["running"] == true { "waiting-window" } else { "waiting-qq" }, "autoRecover": recover, "managed": true}),
             );
         };
-        if let Some(live) = &mut self.onboarding.live {
-            let alive = same_identity(&live.target, &target)
-                && live
-                    .remote
-                    .as_mut()
-                    .is_some_and(|c| c.try_wait().ok().flatten().is_none())
-                && check_rfb(live.port);
-            if alive {
+        let cleanup_reason = if let Some(live) = &mut self.onboarding.live {
+            let identity_matches = same_identity(&live.target, &target);
+            let remote_alive = live
+                .remote
+                .as_mut()
+                .is_some_and(|child| matches!(child.try_wait(), Ok(None)));
+            let tunnel_alive = live
+                .tunnel
+                .as_mut()
+                .is_some_and(|child| matches!(child.try_wait(), Ok(None)));
+            let rfb_ready =
+                identity_matches && remote_alive && tunnel_alive && check_rfb(live.port);
+            if rfb_ready {
                 return Ok(
                     json!({"state": "ready", "generation": self.onboarding.generation,
                     "targetPort": live.port, "profile": self.profile.normalized_json(), "autoRecover": recover, "managed": true}),
                 );
             }
-        }
-        self.cleanup_all();
+            let reason = if !identity_matches {
+                "target-changed"
+            } else if !remote_alive {
+                "supervisor-unavailable"
+            } else if !tunnel_alive {
+                "tunnel-unavailable"
+            } else {
+                "rfb-probe-failed"
+            };
+            diagnostics::log(
+                "main-health-failed",
+                json!({"reason": reason, "identityMatches": identity_matches, "supervisorAlive": remote_alive, "tunnelAlive": tunnel_alive, "rfbReady": rfb_ready, "localPort": live.port}),
+            );
+            reason
+        } else {
+            "initial-connect"
+        };
+        self.cleanup_all(cleanup_reason);
         if reconnect && !recover {
             return Ok(json!({"state": "disconnected", "autoRecover": false, "managed": true}));
         }

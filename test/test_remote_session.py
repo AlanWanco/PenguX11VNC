@@ -23,6 +23,33 @@ SPEC.loader.exec_module(REMOTE)
 
 
 class RemoteSessionTests(unittest.TestCase):
+    def test_vnc_stderr_keeps_only_error_categories_and_codes(self) -> None:
+        self.assertEqual(
+            REMOTE.classify_vnc_stderr(
+                b"X Error: BadWindow password=secret clipboard=private"
+            ),
+            {"category": "x11-error", "xError": "BadWindow"},
+        )
+        self.assertEqual(
+            REMOTE.classify_vnc_stderr(
+                b"Major opcode of failed request: 3 (X_GetWindowAttributes)"
+            ),
+            {"category": "x11-error", "majorOpcode": 3},
+        )
+        self.assertEqual(
+            REMOTE.classify_vnc_stderr(b"Resource id in failed request: 0x1200468"),
+            {"category": "x11-error", "resourceId": 18875496},
+        )
+        self.assertEqual(
+            REMOTE.classify_vnc_stderr(
+                b"XIO: fatal IO error 104 (Connection reset by peer) on X server"
+            ),
+            {"category": "xio-fatal", "errno": 104},
+        )
+        self.assertIsNone(
+            REMOTE.classify_vnc_stderr(b"password=secret clipboard=private")
+        )
+
     def test_window_watcher_handles_only_lifecycle_events(self) -> None:
         for event_type, expected in [
             (16, "create"),
@@ -236,6 +263,107 @@ class RemoteSessionTests(unittest.TestCase):
             ("exe", "/tmp/qq"),
         ]:
             self.assertFalse(REMOTE.same_window(target, {**target, key: value}))
+
+    def test_supervisor_logs_natural_exit_and_drains_noisy_stderr_safely(self) -> None:
+        self.check_supervisor_diagnostics(natural_exit=True)
+
+    def test_supervisor_logs_owner_eof_and_final_exit_code(self) -> None:
+        self.check_supervisor_diagnostics(natural_exit=False)
+
+    def check_supervisor_diagnostics(self, natural_exit: bool) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable = root / "x11vnc"
+            executable.write_text(
+                f"#!{sys.executable}\n"
+                "import sys,time\n"
+                "print('PORT=5990', flush=True)\n"
+                "time.sleep(0.1)\n"
+                "sys.stderr.write('unrecognized password=secret clipboard=private\\n' * 12000)\n"
+                "sys.stderr.write('Connection refused password=secret\\n' * 50)\n"
+                "sys.stderr.write('X Error: BadWindow password=secret\\n')\n"
+                "sys.stderr.flush()\n"
+                + ("raise SystemExit(7)\n" if natural_exit else "time.sleep(60)\n")
+            )
+            executable.chmod(0o700)
+            code = (
+                f"exec(compile(open({str(ROOT / 'tools/remote-session.py')!r}).read(), 'fixture', 'exec'), "
+                "scope := {'__name__': 'fixture'}); "
+                "scope['probe'] = lambda options: {'passwordReady': True, 'windows': [{'normal': True, 'transient': False}]}; "
+                "scope['same_window'] = lambda a, b: True; "
+                "scope['X11'] = type('FakeX11', (), {"
+                "'__init__': lambda self, target: None, "
+                "'ensure_visible': lambda self, target: False, "
+                "'activate': lambda self, target: False, "
+                "'close': lambda self: None}); "
+                "scope['serve']({'target': {'display': ':0', 'xauthority': '/tmp/test-auth', 'id': '0x10'}, "
+                "'passwordFile': '/tmp/test-pass'})"
+            )
+            process = subprocess.Popen(
+                [sys.executable, "-c", code],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env={
+                    **os.environ,
+                    "PATH": f"{root}:{os.environ['PATH']}",
+                    "PENGUX11VNC_DEBUG_WINDOWS": "1",
+                },
+            )
+            try:
+                import selectors
+
+                selector = selectors.DefaultSelector()
+                selector.register(process.stdout, selectors.EVENT_READ)
+                self.assertTrue(
+                    selector.select(5), "supervisor did not signal readiness"
+                )
+                selector.close()
+                self.assertEqual(json.loads(process.stdout.readline()), {"port": 5990})
+                time.sleep(0.2)
+                if natural_exit:
+                    self.assertEqual(process.wait(timeout=5), 0)
+                else:
+                    process.stdin.close()
+                    self.assertEqual(process.wait(timeout=5), 0)
+                diagnostic = process.stderr.read()
+                self.assertNotIn("password=secret", diagnostic)
+                self.assertNotIn("clipboard=private", diagnostic)
+                messages = [
+                    json.loads(line.split("] ", 1)[1])
+                    for line in diagnostic.splitlines()
+                    if line.startswith("[PenguX11VNC lifecycle] ")
+                ]
+                self.assertTrue(all(item["at"].endswith("Z") for item in messages))
+                exit_event = next(
+                    item for item in messages if item["event"] == "vnc-exit"
+                )
+                self.assertEqual(
+                    exit_event["reason"], "vnc-exited" if natural_exit else "owner-eof"
+                )
+                self.assertEqual(exit_event["returncode"], 7 if natural_exit else -15)
+                self.assertFalse(exit_event["forced"])
+                if natural_exit:
+                    self.assertEqual(exit_event["lastError"]["xError"], "BadWindow")
+                    self.assertGreater(exit_event["stderrErrors"], 32)
+                    self.assertLessEqual(
+                        sum(item["event"] == "vnc-stderr" for item in messages), 32
+                    )
+                    self.assertGreater(exit_event["stderrBytes"], 100_000)
+                child_pid = next(
+                    item["pid"] for item in messages if item["event"] == "vnc-spawn"
+                )
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(child_pid, 0)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=5)
+                if process.stdin and not process.stdin.closed:
+                    process.stdin.close()
+                process.stdout.close()
+                process.stderr.close()
 
     def test_supervisor_terminates_only_its_child_on_stdin_eof(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -1,4 +1,5 @@
 mod clipboard_image;
+mod diagnostics;
 mod manager;
 mod process;
 mod tray;

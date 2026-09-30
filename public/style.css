@@ -775,7 +775,9 @@ dialog {
   background: #241f2c;
   color: inherit;
   padding: 30px;
-  width: 360px;
+  width: min(360px, calc(100vw - 32px));
+  max-height: calc(100dvh - 32px);
+  overflow: auto;
   box-shadow: 0 24px 100px #0008;
 }
 .file-upload-dialog {
@@ -845,13 +847,14 @@ dialog label {
   margin-top: 2px;
 }
 .dialog-actions {
-  display: flex;
-  justify-content: flex-end;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
   margin-top: 8px;
 }
 .dialog-actions button {
-  min-width: 88px;
+  width: 100%;
+  min-width: 0;
   height: 36px;
 }
 body.immersive .titlebar {

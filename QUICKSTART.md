@@ -214,6 +214,12 @@ PENGUX11VNC_DEBUG=1 npm run tauri:dev
 
 该开关会记录窗口枚举、远端 SSH 标准错误、子窗口会话清理、VNC 断线/重连、缩放保存、主窗口焦点恢复和实际鼠标坐标映射；managed 模式内置的远端 X11 探测日志会进入同一条诊断链。普通运行默认关闭，不会增加日志。手工回退入口会写入私有 `.runtime/server.log`；Tauri 模式会在应用数据目录写入 `tauri-server.log` 和 `tauri-manager.log`。日志可能包含窗口 ID、尺寸、DISPLAY/XAUTHORITY 路径和 SSH 错误，不包含屏幕图像、剪贴板内容、私钥、VNC 密码或访问令牌；提交日志前请检查并删去主机名等环境信息。非 managed 模式的旧版远端 C helper 不会自动替换，只有部署了本版本 helper 后才会输出其 X11 `stderr` 细节。
 
+Tauri 的长期 SSH 会话还会记录 `ssh-spawn`、`ssh-stderr`、`ssh-exit`、`ssh-stop-request` 和 `ssh-kill`，用 `role` 区分主窗口 supervisor、主隧道、子隧道、视频和窗口监听。`main-health-failed` 说明主会话为什么被判定失效；`main-cleanup` / `sessions-cleanup` 说明是主动断开、认证失败、打开配置向导、应用退出、配置保存、窗口身份变化还是 RFB 预检失败触发清理。退出记录包含本机 UTC 时间、PID、退出码/信号及是否已经请求清理；已请求清理只代表时间顺序，不自动证明退出由清理导致。
+
+managed 主窗口的 x11vnc `stderr` 仅保留已识别的错误类别、X11 错误名、opcode / resource ID、errno / signal，不原样保存未知文本。`vnc-stop` 与 `vnc-exit` 带远端 UTC 时间、退出原因、最终退出码及是否强制结束，并通过 supervisor 的 SSH 错误流汇入 `tauri-manager.log`。本机与远端时间保留各自来源，比较时需考虑两端时钟偏差。每个 SSH 错误流最多记录 64 条普通诊断，每个 x11vnc 最多记录 32 条错误；达到限额后仍持续排空管道，保留最终退出记录及最后识别到的错误摘要（摘要不自动代表退出原因）。管理日志每份最多约 2 MiB，最多保留当前文件及 `.1` 一份轮转；`tauri-server.log` 暂不轮转。不开 debug 时不启动诊断观察线程、不采集 x11vnc 错误流。
+
+Windows 日志目录为 `%APPDATA%\\com.pengux11vnc.app\\`。再次断连后先保留 `tauri-server.log`、`tauri-manager.log` 和存在的 `tauri-manager.log.1`；不要先重启程序，启动会重置当前日志。仅提取相关时间段，勿公开整个应用数据目录。
+
 复现顺序建议：打开一个 QQ 子窗口 → 收起/恢复 → 关闭子窗口 → 再打开同类子窗口 → 观察主窗口鼠标；然后把对应时间段的日志和现象一并保留。不要单独把 `list-qq-windows` 的 JSON 标准输出当成完整证据，详细诊断在标准错误流中。
 
 ### KDE Wayland 输入授权

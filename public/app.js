@@ -57,6 +57,7 @@ let setupAvailable = false;
 let setupConfigured = true;
 let setupManaged = false;
 let connectionConsentGranted = false;
+let connectionConsentPending = false;
 let connectionWanted = false;
 let recoveryTimer;
 let recoveryEpoch = 0;
@@ -2389,9 +2390,30 @@ function setInteractive() {
   if (rfb) rfb.viewOnly = settings.viewOnly;
 }
 
+function confirmConnectionConsent() {
+  const dialog = $("connection-consent-dialog");
+  // Esc and page/window closure must never reuse a previous affirmative result.
+  dialog.returnValue = "cancel";
+  const confirmed = new Promise((resolve) => {
+    dialog.addEventListener(
+      "close",
+      () => resolve(dialog.returnValue === "connect"),
+      { once: true },
+    );
+  });
+  dialog.showModal();
+  $("connection-consent-cancel").focus();
+  return confirmed;
+}
+
+function cancelConnectionConsent() {
+  const dialog = $("connection-consent-dialog");
+  if (dialog.open) dialog.close("cancel");
+}
+
 async function connect(prepare = true) {
   await sessionReady;
-  if (rfb || connecting) return;
+  if (rfb || connecting || connectionConsentPending || pageLeaving) return;
   if (setupAvailable && !setupConfigured) {
     toast("连接资料尚未完成预检，请先继续设置连接。");
     return;
@@ -2401,11 +2423,20 @@ async function connect(prepare = true) {
     return;
   }
   if (setupAvailable && setupManaged && prepare && !connectionConsentGranted) {
-    const allowed = window.confirm(
-      "现在将通过 SSH 为所选 QQ 窗口启动仅监听远端 localhost 的 x11vnc，并在断开时清理本工具启动的服务。是否继续？",
-    );
-    if (!allowed) return;
-    connectionConsentGranted = true;
+    const consentEpoch = connectEpoch;
+    connectionConsentPending = true;
+    $("connect").disabled = true;
+    try {
+      const allowed = await confirmConnectionConsent();
+      if (!allowed || pageLeaving || consentEpoch !== connectEpoch) return;
+      connectionConsentGranted = true;
+    } finally {
+      connectionConsentPending = false;
+      if (!rfb && !connecting && !pageLeaving) {
+        $("connect").disabled = false;
+        $("connect").focus();
+      }
+    }
   }
   if (isTauriShell() && isMainSession) {
     const width = Math.round(window.innerWidth);
@@ -2488,7 +2519,7 @@ async function connect(prepare = true) {
     });
     client.addEventListener("securityfailure", () => {
       void clearVncPasswordCache();
-      stopMainConnection().catch(() => {});
+      stopMainConnection("authentication-failed").catch(() => {});
       toast("VNC 认证失败，已停止自动重试。请检查密码后重新连接。");
     });
     let childFirstFrameReported = false;
@@ -2738,9 +2769,10 @@ async function cleanupOpenedChildSessions() {
     }
   }
 }
-async function stopMainConnection() {
+async function stopMainConnection(reason = "user-disconnect") {
   const client = rfb;
   connectionConsentGranted = false;
+  cancelConnectionConsent();
   manualDisconnectPending = Boolean(client);
   void stopVideoStream();
   connectEpoch++;
@@ -2759,13 +2791,19 @@ async function stopMainConnection() {
         }).catch(() => {}),
       );
   await childrenCleanup;
-  if (setupAvailable) await api("/api/main/stop", { method: "POST" });
+  if (setupAvailable)
+    await api("/api/main/stop", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reason }),
+    });
   setInteractive();
 }
 async function openSetup() {
   try {
+    cancelConnectionConsent();
     if (connected || connecting || connectionWanted || rfb)
-      await stopMainConnection();
+      await stopMainConnection("open-setup");
     location.href = `./setup.html#token=${encodeURIComponent(token)}`;
   } catch {
     toast("无法停止当前会话，请稍后重试。");
@@ -3000,6 +3038,7 @@ $("send-clipboard").addEventListener("click", () => {
 $("screen").addEventListener("scroll", () => imeOverlay?.position(), true);
 window.addEventListener("pagehide", () => {
   pageLeaving = true;
+  cancelConnectionConsent();
   clearTimeout(disconnectReportTimer);
   disconnectReportTimer = undefined;
   if (!isMainSession && rfb) manualDisconnectPending = true;

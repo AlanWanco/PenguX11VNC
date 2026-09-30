@@ -320,6 +320,29 @@
       ><span id="geometry">原始像素 · 等比例缩放</span>
     </footer>
     <div id="toast" role="status" hidden></div>
+    <dialog
+      id="connection-consent-dialog"
+      aria-labelledby="connection-consent-title"
+      aria-describedby="connection-consent-note"
+    >
+      <form method="dialog">
+        <span class="eyebrow">CONNECTION AUTHORIZATION</span>
+        <h2 id="connection-consent-title">确认启动单窗口 VNC</h2>
+        <p id="connection-consent-note">
+          连接将通过 SSH 为所选 QQ 窗口启动 x11vnc，仅监听远端
+          localhost。断开时只清理本工具启动的服务；不会启动第二个
+          QQ，也不捕获整个桌面。
+        </p>
+        <div class="dialog-actions">
+          <button id="connection-consent-cancel" value="cancel" autofocus>
+            取消
+          </button>
+          <button id="connection-consent-allow" class="primary" value="connect">
+            允许并连接
+          </button>
+        </div>
+      </form>
+    </dialog>
     <dialog id="password-dialog">
       <form id="password-form">
         <span class="eyebrow">PRIVATE CONNECTION</span>

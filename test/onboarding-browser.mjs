@@ -17,6 +17,7 @@ let draftSaves = 0;
 let preflights = 0;
 let starts = 0;
 let stops = 0;
+const stopReasons = [];
 let polls = 0;
 let pendingProfile;
 let profile = {
@@ -101,6 +102,7 @@ const manager = http.createServer(async (req, res) => {
     };
   } else if (req.url === "/main/stop") {
     stops++;
+    stopReasons.push(body.reason);
     data = { ok: true };
   } else if (req.url === "/windows") data = { windows: [] };
   else {
@@ -124,6 +126,10 @@ const browser = await chromium.launch({ channel: "chrome", headless: true });
 const page = await browser.newPage();
 const errors = [];
 page.on("pageerror", (error) => errors.push(error.message));
+page.on("dialog", (dialog) => {
+  errors.push(`Unexpected native browser dialog: ${dialog.type()}`);
+  void dialog.dismiss();
+});
 // The wizard runs in the main window. Model a frameless window so the in-page
 // top bar must supply both dragging and closing.
 await page.addInitScript(() => {
@@ -350,14 +356,110 @@ try {
   await configuredSetupPage.close();
   assert.deepEqual(configuredSetupErrors, []);
 
-  page.once("dialog", (dialog) => void dialog.dismiss());
-  await page.click("#connect");
-  assert.equal(starts, 0, "Canceling connection consent must not start VNC");
-  page.once("dialog", (dialog) => void dialog.accept());
   await page.waitForFunction(
     () => document.querySelector("#setup-open").textContent === "编辑连接配置",
   );
+  const consent = page.locator("#connection-consent-dialog");
   await page.click("#connect");
+  await consent.waitFor({ state: "visible" });
+  assert.equal(starts, 0, "Showing the modal must not start SSH/VNC");
+  assert(
+    await page.isDisabled("#connect"),
+    "Pending consent must block duplicate attempts",
+  );
+  assert.equal(
+    await page.evaluate(() => document.activeElement?.id),
+    "connection-consent-cancel",
+    "Remote startup consent must default focus to cancel",
+  );
+  await page.click("#connection-consent-cancel");
+  await consent.waitFor({ state: "hidden" });
+  await page.waitForFunction(
+    () => !document.querySelector("#connect").disabled,
+  );
+  assert.equal(starts, 0, "Canceling connection consent must not start VNC");
+  assert.equal(
+    await page.evaluate(() => document.activeElement?.id),
+    "connect",
+  );
+
+  await page.click("#connect");
+  await consent.waitFor({ state: "visible" });
+  await page.keyboard.press("Escape");
+  await consent.waitFor({ state: "hidden" });
+  await page.waitForFunction(
+    () => !document.querySelector("#connect").disabled,
+  );
+  assert.equal(starts, 0, "Esc must deny consent without starting VNC");
+
+  await page.click("#connect");
+  await consent.waitFor({ state: "visible" });
+  await page.keyboard.press("Enter");
+  await consent.waitFor({ state: "hidden" });
+  await page.waitForFunction(
+    () => !document.querySelector("#connect").disabled,
+  );
+  assert.equal(
+    starts,
+    0,
+    "Enter on the default cancel action must not grant consent",
+  );
+
+  const leavingPage = await browser.newPage();
+  leavingPage.on("pageerror", (error) => errors.push(error.message));
+  await leavingPage.goto(app.url);
+  await leavingPage.waitForFunction(
+    () => !document.querySelector("#connect").disabled,
+  );
+  await leavingPage.click("#connect");
+  await leavingPage
+    .locator("#connection-consent-dialog")
+    .waitFor({ state: "visible" });
+  await leavingPage.evaluate(() => window.dispatchEvent(new Event("pagehide")));
+  await leavingPage
+    .locator("#connection-consent-dialog")
+    .waitFor({ state: "hidden" });
+  assert.equal(
+    starts,
+    0,
+    "Leaving the page must cancel pending remote-start consent",
+  );
+  await leavingPage.close();
+
+  await page.click("#connect");
+  await consent.waitFor({ state: "visible" });
+  await page.evaluate(() => {
+    const button = document.querySelector("#connect");
+    for (let i = 0; i < 4; i++) button.dispatchEvent(new Event("click"));
+  });
+  assert.equal(await page.locator("dialog[open]").count(), 1);
+  assert.equal(
+    starts,
+    0,
+    "Duplicate requests must remain blocked until explicit consent",
+  );
+  await page.setViewportSize({ width: 320, height: 568 });
+  const modalBox = await consent.boundingBox();
+  assert(modalBox.x >= 0 && modalBox.x + modalBox.width <= 320);
+  const cancelBox = await page
+    .locator("#connection-consent-cancel")
+    .boundingBox();
+  const allowBox = await page
+    .locator("#connection-consent-allow")
+    .boundingBox();
+  assert(
+    Math.abs(cancelBox.width - allowBox.width) < 1,
+    "Modal actions must have equal widths",
+  );
+  assert.equal(
+    cancelBox.height,
+    allowBox.height,
+    "Modal actions must have equal heights",
+  );
+  assert.equal(cancelBox.y, allowBox.y, "Modal actions must share a baseline");
+  await page.click("#connection-consent-allow");
+  await consent.waitFor({ state: "hidden" });
+  await page.setViewportSize({ width: 1280, height: 720 });
   await page.waitForFunction(
     () => document.querySelector("#status").textContent === "已连接",
   );
@@ -388,13 +490,27 @@ try {
   await page.click("#disconnect");
   await page.waitForTimeout(300);
   assert.equal(stops, 1);
+  assert.deepEqual(stopReasons, ["user-disconnect"]);
   const stoppedPolls = polls;
   await page.waitForTimeout(5500);
   assert.equal(polls, stoppedPolls, "User disconnect must cancel recovery");
+  await page.click("#settings-close");
+  await page.click("#connect");
+  await consent.waitFor({ state: "visible" });
+  await page.keyboard.press("Escape");
+  await consent.waitFor({ state: "hidden" });
+  await page.waitForFunction(
+    () => !document.querySelector("#connect").disabled,
+  );
+  assert.equal(
+    starts,
+    1,
+    "Esc must not reuse affirmative consent from an earlier connection",
+  );
 
   assert.deepEqual(errors, []);
   console.log(
-    "PASS: single save action, discard navigation, pending-profile home, read-only preflight, connection consent, recovery, explicit stop",
+    "PASS: single save action, discard navigation, pending-profile home, read-only preflight, themed consent modal, cancel/Esc/pagehide safety, duplicate guard, equal actions, recovery, explicit stop",
   );
 } finally {
   await browser.close();

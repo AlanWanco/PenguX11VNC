@@ -3,6 +3,7 @@ mod onboarding;
 use onboarding::Onboarding;
 
 use crate::clipboard_image::{ClipboardImageSync, StatusCallback, REMOTE_FRAME_PYTHON};
+use crate::diagnostics::{self, DiagnosticChild};
 use crate::process::CommandSpawnExt;
 
 use rand::random;
@@ -28,24 +29,11 @@ const LEGACY_CONFIG: &str = ".config/qq-window-viewer/connections.json";
 const VNC_CREDENTIAL_SERVICE: &str = "com.alanwanco.PenguX11VNC";
 
 fn debug_enabled() -> bool {
-    std::env::var("PENGUX11VNC_DEBUG").as_deref() == Ok("1")
+    diagnostics::enabled()
 }
 
 fn debug_log(event: &str, details: impl std::fmt::Display) {
-    if !debug_enabled() {
-        return;
-    }
-    let details = details
-        .to_string()
-        .replace('\n', "\\n")
-        .replace('\r', "\\r");
-    let line = format!("[PenguX11VNC debug] {event} {details}");
-    eprintln!("{line}");
-    if let Ok(path) = std::env::var("PENGUX11VNC_DEBUG_LOG") {
-        if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
-            let _ = writeln!(file, "{line}");
-        }
-    }
+    diagnostics::log(event, json!({"details": details.to_string()}));
 }
 
 const FILE_CLIPBOARD_X11_PYTHON: &str = r#"
@@ -544,11 +532,11 @@ pub struct ChildSessionInfo {
 struct ChildSession {
     info: ChildSessionInfo,
     remote_pid: u32,
-    tunnel: Child,
+    tunnel: DiagnosticChild,
 }
 
 struct VideoSession {
-    child: Child,
+    child: DiagnosticChild,
     stdin: Option<ChildStdin>,
     messages: Receiver<String>,
 }
@@ -774,7 +762,7 @@ impl ManagerState {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .spawn_managed()?;
+            .spawn_diagnostic("child-tunnel")?;
         if let Err(error) = wait_for_rfb(local_port, Duration::from_secs(8)) {
             let _ = tunnel.kill();
             let _ = tunnel.wait();
@@ -1026,8 +1014,12 @@ impl ManagerState {
         }
     }
 
-    fn cleanup_all(&mut self) {
-        self.onboarding.stop();
+    fn cleanup_all(&mut self, reason: &'static str) {
+        diagnostics::log(
+            "sessions-cleanup",
+            json!({"reason": reason, "videos": self.videos.len(), "children": self.children.len()}),
+        );
+        self.onboarding.stop(reason);
         let video_ids: Vec<String> = self.videos.keys().cloned().collect();
         for id in video_ids {
             self.cleanup_video(&id);
@@ -1519,7 +1511,7 @@ impl ManagerRuntime {
             let _ = join.join();
         }
         if let Ok(mut state) = self.state.lock() {
-            state.cleanup_all();
+            state.cleanup_all("runtime-stop");
         }
     }
 }
@@ -1585,7 +1577,7 @@ pub fn load_profile() -> io::Result<Profile> {
     Ok(Profile { id, raw })
 }
 
-pub fn start_main_tunnel(profile: &Profile) -> io::Result<Option<Child>> {
+pub fn start_main_tunnel(profile: &Profile) -> io::Result<Option<DiagnosticChild>> {
     if check_rfb(profile.local_port()) {
         return Ok(None);
     }
@@ -1598,7 +1590,7 @@ pub fn start_main_tunnel(profile: &Profile) -> io::Result<Option<Child>> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn_managed()?;
+        .spawn_diagnostic("main-tunnel")?;
     if let Err(error) = wait_for_rfb(profile.local_port(), Duration::from_secs(10)) {
         let _ = child.kill();
         let _ = child.wait();
@@ -1607,7 +1599,7 @@ pub fn start_main_tunnel(profile: &Profile) -> io::Result<Option<Child>> {
     Ok(Some(child))
 }
 
-fn spawn_window_watch(profile: &Profile) -> io::Result<(Child, ChildStdin, ChildStdout)> {
+fn spawn_window_watch(profile: &Profile) -> io::Result<(DiagnosticChild, ChildStdin, ChildStdout)> {
     let options = json!({
         "display": profile.display(),
         "xauthority": profile.xauthority(),
@@ -1622,8 +1614,7 @@ fn spawn_window_watch(profile: &Profile) -> io::Result<(Child, ChildStdin, Child
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn_managed()?;
+        .spawn_diagnostic("window-watch")?;
     let Some(mut stdin) = child.stdin.take() else {
         let _ = child.kill();
         let _ = child.wait();
@@ -1746,6 +1737,7 @@ fn stream_window_watch(mut stream: TcpStream, state: Arc<Mutex<ManagerState>>) {
         }
     }
     let _ = stream.write_all(b"0\r\n\r\n");
+    child.request_stop("window-watch-client-closed");
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -1791,8 +1783,7 @@ fn spawn_video_session(profile: &Profile, options: &Value) -> io::Result<VideoSe
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn_managed()?;
+        .spawn_diagnostic("video-worker")?;
     let Some(mut stdin) = child.stdin.take() else {
         let _ = child.kill();
         let _ = child.wait();
@@ -1836,9 +1827,10 @@ fn stop_video_session(session: VideoSession) {
 }
 
 fn stop_video_worker(
-    child: &mut Child,
+    child: &mut DiagnosticChild,
     stdin: &mut Option<ChildStdin>,
 ) -> io::Result<std::process::ExitStatus> {
+    child.request_stop("video-stop");
     if let Some(stdin) = stdin.as_mut() {
         let _ = write_video_command(stdin, &json!({"action": "stop"}));
     }
@@ -1877,7 +1869,8 @@ fn kill_remote_vnc_process(profile: &Profile, remote_pid: u32) {
     let _ = run_ssh(profile, &command, Duration::from_secs(5));
 }
 
-fn stop_remote_vnc(profile: &Profile, remote_pid: u32, tunnel: &mut Child) {
+fn stop_remote_vnc(profile: &Profile, remote_pid: u32, tunnel: &mut DiagnosticChild) {
+    tunnel.request_stop("child-session-cleanup");
     let _ = tunnel.kill();
     let _ = tunnel.wait();
     kill_remote_vnc_process(profile, remote_pid);
@@ -2364,7 +2357,13 @@ fn handle_request(mut stream: TcpStream, state: Arc<Mutex<ManagerState>>, token:
             .lock()
             .map_err(|_| io::Error::other("manager locked"))
             .map(|mut manager| {
-                manager.cleanup_all();
+                let reason = match body["reason"].as_str() {
+                    Some("user-disconnect") => "user-disconnect",
+                    Some("authentication-failed") => "authentication-failed",
+                    Some("open-setup") => "open-setup",
+                    _ => "main-stop-request",
+                };
+                manager.cleanup_all(reason);
                 json!({"ok": true})
             }),
         ("GET", "/status") => Ok(json!({"ok": true})),
@@ -2679,7 +2678,7 @@ mod video_shutdown_tests {
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        let mut child = command.spawn_managed().unwrap();
+        let mut child = command.spawn_diagnostic("test-video-worker").unwrap();
         let mut stdin = child.stdin.take();
 
         let status = stop_video_worker(&mut child, &mut stdin).unwrap();

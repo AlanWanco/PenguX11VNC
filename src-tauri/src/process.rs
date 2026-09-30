@@ -3,9 +3,22 @@ use std::process::{Child, Command};
 
 pub(crate) trait CommandSpawnExt {
     fn spawn_managed(&mut self) -> io::Result<Child>;
+    fn spawn_diagnostic(
+        &mut self,
+        role: &'static str,
+    ) -> io::Result<crate::diagnostics::DiagnosticChild>;
 }
 
 impl CommandSpawnExt for Command {
+    fn spawn_diagnostic(
+        &mut self,
+        role: &'static str,
+    ) -> io::Result<crate::diagnostics::DiagnosticChild> {
+        self.stderr(crate::diagnostics::stderr_stream());
+        self.spawn_managed()
+            .map(|child| crate::diagnostics::DiagnosticChild::new(child, role))
+    }
+
     fn spawn_managed(&mut self) -> io::Result<Child> {
         let child = self.spawn()?;
         #[cfg(windows)]

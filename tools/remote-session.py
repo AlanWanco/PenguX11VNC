@@ -19,6 +19,7 @@ import stat
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from itertools import pairwise
 from pathlib import Path
 
@@ -34,6 +35,70 @@ def debug_log(event: str, **details: object) -> None:
         file=sys.stderr,
         flush=True,
     )
+
+
+def lifecycle_log(event: str, **details: object) -> None:
+    if not DEBUG_WINDOWS:
+        return
+    payload = {
+        "at": datetime.now(timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z"),
+        "event": event,
+        **details,
+    }
+    try:
+        print(
+            "[PenguX11VNC lifecycle] " + json.dumps(payload, separators=(",", ":")),
+            file=sys.stderr,
+            flush=True,
+        )
+    except OSError:
+        # A disappearing SSH owner must not prevent our child cleanup.
+        pass
+
+
+def classify_vnc_stderr(line: bytes) -> dict | None:
+    """Keep known error classes/codes only; never persist arbitrary stderr text."""
+    text = line.decode("utf-8", errors="replace")
+    x_error = re.search(
+        r"\b(BadAccess|BadAlloc|BadAtom|BadCursor|BadDrawable|BadFont|BadGC|"
+        r"BadIDChoice|BadImplementation|BadLength|BadMatch|BadName|BadPixmap|"
+        r"BadRequest|BadValue|BadWindow)\b",
+        text,
+    )
+    if x_error:
+        return {"category": "x11-error", "xError": x_error[1]}
+    for pattern, field in (
+        (r"Major opcode[^:]*:\s*(\d+)", "majorOpcode"),
+        (r"Minor opcode[^:]*:\s*(\d+)", "minorOpcode"),
+    ):
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return {"category": "x11-error", field: int(match[1])}
+    resource = re.search(r"Resource id[^:]*:\s*0x([0-9a-f]+)", text, re.IGNORECASE)
+    if resource:
+        return {"category": "x11-error", "resourceId": int(resource[1], 16)}
+    if "XIO:" in text:
+        error = re.search(r"(?:IO|I/O) error\s+(\d+)", text, re.IGNORECASE)
+        return {"category": "xio-fatal", **({"errno": int(error[1])} if error else {})}
+    caught_signal = re.search(r"Caught signal[: ]+\s*(\d+)", text, re.IGNORECASE)
+    if caught_signal:
+        return {"category": "signal", "signal": int(caught_signal[1])}
+    for pattern, category in (
+        ("connection reset", "connection-reset"),
+        ("econnreset", "connection-reset"),
+        ("broken pipe", "broken-pipe"),
+        ("connection refused", "connection-refused"),
+        ("timed out", "connection-timeout"),
+        ("cannot open display", "display-unavailable"),
+        ("unable to open display", "display-unavailable"),
+        ("address already in use", "bind-failed"),
+        ("fatal", "fatal-error"),
+    ):
+        if pattern in text.lower():
+            return {"category": category}
+    return None
 
 
 class Attributes(C.Structure):
@@ -668,11 +733,20 @@ def activate(options: dict) -> dict:
 
 
 def serve(options: dict) -> None:
-    def interrupted(_signal: int, _frame: object) -> None:
+    stop_reason = "vnc-exited"
+
+    def interrupted(received_signal: int, _frame: object) -> None:
+        nonlocal stop_reason
+        stop_reason = {
+            signal.SIGTERM: "signal-term",
+            signal.SIGHUP: "signal-hup",
+            signal.SIGINT: "signal-int",
+        }.get(received_signal, "supervisor-error")
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGHUP, interrupted)
+    signal.signal(signal.SIGINT, interrupted)
     target, password = options["target"], options["passwordFile"]
     debug_log("serve-start", target_id=target.get("id"), display=target.get("display"))
     report = probe({"passwordFile": password})
@@ -711,12 +785,41 @@ def serve(options: dict) -> None:
         args,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE if DEBUG_WINDOWS else subprocess.DEVNULL,
     )
-    debug_log("vnc-spawn", target_id=target.get("id"), pid=child.pid)
+    lifecycle_log("vnc-spawn", pid=child.pid)
     selector = selectors.DefaultSelector()
     selector.register(sys.stdin, selectors.EVENT_READ, "owner")
     selector.register(child.stdout, selectors.EVENT_READ, "vnc")
+    if child.stderr is not None:
+        selector.register(child.stderr, selectors.EVENT_READ, "vnc-stderr")
+    stderr_buffer = bytearray()
+    stderr_bytes = 0
+    stderr_records = 0
+    stderr_errors = 0
+    last_stderr_error = None
+
+    def report_stderr_line(line: bytes) -> None:
+        nonlocal stderr_records, stderr_errors, last_stderr_error
+        diagnostic = classify_vnc_stderr(line)
+        if diagnostic is None:
+            return
+        stderr_errors += 1
+        last_stderr_error = diagnostic
+        if stderr_records < 32:
+            lifecycle_log("vnc-stderr", pid=child.pid, **diagnostic)
+            stderr_records += 1
+
+    def consume_stderr(data: bytes) -> None:
+        nonlocal stderr_bytes
+        stderr_bytes += len(data)
+        for byte in data:
+            if byte == 10:
+                report_stderr_line(bytes(stderr_buffer))
+                stderr_buffer.clear()
+            elif len(stderr_buffer) < 2048:
+                stderr_buffer.append(byte)
+
     ready, buffer = False, b""
     owner_buffer = b""
     deadline = time.monotonic() + 10
@@ -724,11 +827,13 @@ def serve(options: dict) -> None:
     try:
         while child.poll() is None:
             if not ready and time.monotonic() > deadline:
+                stop_reason = "startup-timeout"
                 raise RuntimeError("vnc-start-timeout")
             for key, _ in selector.select(0.5):
                 if key.data == "owner":
                     data = os.read(sys.stdin.fileno(), 4096)
                     if not data:
+                        stop_reason = "owner-eof"
                         return
                     owner_buffer = (owner_buffer + data)[-8192:]
                     while b"\n" in owner_buffer:
@@ -741,9 +846,20 @@ def serve(options: dict) -> None:
                                 x11.ensure_visible(target)
                         except (UnicodeError, ValueError, KeyError, RuntimeError):
                             pass
+                elif key.data == "vnc-stderr":
+                    data = os.read(key.fileobj.fileno(), 4096)
+                    if data:
+                        consume_stderr(data)
+                    else:
+                        selector.unregister(key.fileobj)
                 else:
                     data = os.read(child.stdout.fileno(), 4096)
                     if not data:
+                        stop_reason = (
+                            "vnc-exited"
+                            if child.poll() is not None
+                            else "vnc-stdout-eof"
+                        )
                         return
                     buffer = (buffer + data)[-8192:]
                     while b"\n" in buffer:
@@ -751,9 +867,10 @@ def serve(options: dict) -> None:
                         if not ready and line.startswith(b"PORT="):
                             port = int(line[5:])
                             if not 1024 <= port <= 65535:
+                                stop_reason = "invalid-port"
                                 raise RuntimeError("invalid-port")
                             ready = True
-                            debug_log("vnc-ready", pid=child.pid, port=port)
+                            lifecycle_log("vnc-ready", pid=child.pid, port=port)
                             print(json.dumps({"port": port}), flush=True)
             if time.monotonic() >= next_visibility_check:
                 try:
@@ -761,22 +878,61 @@ def serve(options: dict) -> None:
                 except RuntimeError:
                     pass
                 next_visibility_check = time.monotonic() + 1
+    except BaseException:
+        if stop_reason == "vnc-exited":
+            stop_reason = "supervisor-error"
+        raise
     finally:
-        debug_log(
+        terminate_sent = child.poll() is None
+        forced = False
+        lifecycle_log(
             "vnc-stop",
             pid=child.pid,
             ready=ready,
-            returncode=child.poll(),
+            reason=stop_reason,
+            terminateSent=terminate_sent,
         )
-        selector.close()
-        x11.close()
-        if child.poll() is None:
-            child.terminate()
+        if terminate_sent:
+            try:
+                child.terminate()
+            except ProcessLookupError:
+                pass
             try:
                 child.wait(timeout=3)
             except subprocess.TimeoutExpired:
+                forced = True
                 child.kill()
                 child.wait()
+        else:
+            child.wait()
+        if child.stderr is not None:
+            # Drain buffered crash errors even when poll() noticed exit before
+            # the selector woke. Bound the final drain and never block cleanup.
+            os.set_blocking(child.stderr.fileno(), False)
+            for _ in range(16):
+                try:
+                    data = os.read(child.stderr.fileno(), 4096)
+                except (BlockingIOError, OSError):
+                    break
+                if not data:
+                    break
+                consume_stderr(data)
+            if stderr_buffer:
+                report_stderr_line(bytes(stderr_buffer))
+            child.stderr.close()
+        lifecycle_log(
+            "vnc-exit",
+            pid=child.pid,
+            returncode=child.returncode,
+            reason=stop_reason,
+            forced=forced,
+            stderrBytes=stderr_bytes,
+            stderrErrors=stderr_errors,
+            lastError=last_stderr_error,
+        )
+        selector.close()
+        child.stdout.close()
+        x11.close()
 
 
 def vp8_payload_type(sdp_text: str) -> int | None:
