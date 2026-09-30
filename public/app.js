@@ -783,13 +783,16 @@ function coarsePlatform() {
 function showDisconnectReport({ transport, clean, reason, videoFailure }) {
   clearTimeout(disconnectReportTimer);
   if (pageLeaving) return;
+  // Freeze this failure's timestamps before a quick reconnect clears the ring.
+  const events = connectionDiagnostics.slice();
+  const reportConnectionStartedAt = connectionStartedAt;
   disconnectReportTimer = setTimeout(() => {
     disconnectReportTimer = undefined;
     if (pageLeaving) return;
     const generatedAt = new Date().toISOString();
     $("disconnect-report").value = buildDisconnectReport({
       generatedAt,
-      connectionStartedAt,
+      connectionStartedAt: reportConnectionStartedAt,
       runtime: isTauriShell() ? "Tauri" : "Browser",
       platform: coarsePlatform(),
       transport,
@@ -800,7 +803,7 @@ function showDisconnectReport({ transport, clean, reason, videoFailure }) {
       clean,
       reason,
       videoFailure,
-      events: connectionDiagnostics,
+      events,
     });
     $("disconnect-report-copy-status").textContent =
       "报告仅保留连接状态与统计信息；不会自动发送。";

@@ -26,6 +26,7 @@ const browser = await chromium.launch({ headless: true, channel: "chrome" });
 const page = await browser.newPage({
   viewport: { width: 1000, height: 760 },
   deviceScaleFactor: 2,
+  timezoneId: "Asia/Shanghai",
 });
 const errors = [];
 page.on("pageerror", (error) => errors.push(error.message));
@@ -421,6 +422,21 @@ try {
     (event) => event.event === "vnc-disconnect",
   );
   assert(vncDisconnect, "Report must include the safe RFB disconnect event");
+  assert.equal(parsedDisconnectReport.errorAt, vncDisconnect.at);
+  assert.equal(
+    parsedDisconnectReport.errorTimeSource,
+    "frontend-vnc-disconnect",
+  );
+  assert.equal(parsedDisconnectReport.errorTimeZone, "Asia/Shanghai");
+  assert.match(parsedDisconnectReport.errorLocalTime, /\+08:00$/);
+  assert.equal(
+    Date.parse(parsedDisconnectReport.errorLocalTime),
+    Date.parse(vncDisconnect.at),
+  );
+  assert(
+    Date.parse(parsedDisconnectReport.generatedAt) >=
+      Date.parse(vncDisconnect.at),
+  );
   assert.equal(typeof vncDisconnect.socketCloseCode, "number");
   assert.equal(typeof vncDisconnect.socketCloseWasClean, "boolean");
   assert.equal(typeof vncDisconnect.socketCloseReasonLength, "number");

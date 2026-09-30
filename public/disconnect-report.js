@@ -57,6 +57,44 @@ function safeTimestamp(value) {
     : undefined;
 }
 
+function localTimestamp(timestamp) {
+  if (!timestamp) return null;
+  const date = new Date(timestamp);
+  const pad = (value, width = 2) => String(value).padStart(width, "0");
+  const offsetMinutes = -date.getTimezoneOffset();
+  const absoluteOffset = Math.abs(offsetMinutes);
+  const offset = `${offsetMinutes >= 0 ? "+" : "-"}${pad(Math.floor(absoluteOffset / 60))}:${pad(absoluteOffset % 60)}`;
+  return (
+    `${pad(date.getFullYear(), 4)}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
+    `T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}` +
+    `.${pad(date.getMilliseconds(), 3)}${offset}`
+  );
+}
+
+function errorTimestamp(events, reason, startedAt, generatedAt) {
+  const preferredEvents =
+    reason === "video-stream-failure"
+      ? ["video-failure", "video-error", "vnc-disconnect"]
+      : ["vnc-disconnect"];
+  const started = Date.parse(startedAt || "");
+  const generated = Date.parse(generatedAt);
+  for (const name of preferredEvents) {
+    const event = [...events].reverse().find((candidate) => {
+      if (candidate?.event !== name) return false;
+      const at = safeTimestamp(candidate.at);
+      const time = Date.parse(at || "");
+      return (
+        Number.isFinite(time) &&
+        time <= generated &&
+        (!Number.isFinite(started) || time >= started)
+      );
+    });
+    if (event)
+      return { at: safeTimestamp(event.at), source: `frontend-${name}` };
+  }
+  return { at: null, source: "unavailable" };
+}
+
 export function sanitizeDiagnosticEvent(
   event,
   details = {},
@@ -133,6 +171,13 @@ export function buildDisconnectReport({
   const safeGeneratedAt =
     safeTimestamp(generatedAt) || new Date().toISOString();
   const safeConnectionStartedAt = safeTimestamp(connectionStartedAt);
+  const boundedEvents = Array.isArray(events) ? events.slice(-30) : [];
+  const error = errorTimestamp(
+    boundedEvents,
+    reason,
+    safeConnectionStartedAt,
+    safeGeneratedAt,
+  );
   const started = Date.parse(safeConnectionStartedAt || "");
   const ended = Date.parse(safeGeneratedAt);
   const safeFailure = videoFailure
@@ -146,6 +191,12 @@ export function buildDisconnectReport({
   return JSON.stringify(
     {
       format: "PenguX11VNC disconnect report v1",
+      errorAt: error.at,
+      errorLocalTime: localTimestamp(error.at),
+      errorTimeZone: error.at
+        ? Intl.DateTimeFormat().resolvedOptions().timeZone
+        : null,
+      errorTimeSource: error.source,
       generatedAt: safeGeneratedAt,
       connectionStartedAt: Number.isFinite(started)
         ? new Date(started).toISOString()
@@ -171,8 +222,7 @@ export function buildDisconnectReport({
         reason: safeScalar(reason) || "unknown",
       },
       videoFailure: safeFailure,
-      recentEvents: (Array.isArray(events) ? events : [])
-        .slice(-30)
+      recentEvents: boundedEvents
         .map((event) =>
           event && typeof event.event === "string"
             ? sanitizeDiagnosticEvent(

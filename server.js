@@ -24,10 +24,17 @@ import { startImeBridge, imeCommandFor } from "./ime-bridge.js";
 
 const execFileAsync = promisify(execFile);
 const debugEnabled = process.env.PENGUX11VNC_DEBUG === "1";
+export function formatDebugLog(
+  event,
+  details = {},
+  at = new Date().toISOString(),
+) {
+  const safe = (JSON.stringify(details) || "{}").slice(0, 12000);
+  return `[PenguX11VNC debug] ${at} ${event} ${safe}`;
+}
 function debugLog(event, details = {}) {
   if (!debugEnabled) return;
-  const safe = (JSON.stringify(details) || "{}").slice(0, 12000);
-  console.error(`[PenguX11VNC debug] ${event} ${safe}`);
+  console.error(formatDebugLog(event, details));
 }
 const root = path.dirname(fileURLToPath(import.meta.url));
 const publicRoot = path.join(root, "public");
