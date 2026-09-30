@@ -42,6 +42,7 @@ let childWatchRetryResolve;
 let childMonitorEpoch = 0;
 let childSnapshotQueue = Promise.resolve();
 let clipboardTimer;
+let clipboardSyncActivity = "idle";
 let clipboardImageSyncActive = false;
 let clipboardImageSyncUnlisten;
 let clipboardImageSyncQueue = Promise.resolve();
@@ -366,6 +367,7 @@ function syncSettingsControls() {
   $("clipboard-sync").checked = settings.clipboardSync;
   if (!clipboardImageSyncActive)
     $("clipboard-image-status").textContent = clipboardImageInactiveStatus();
+  updateClipboardSyncIndicator();
   $("connection-mode").value = settings.connectionMode;
   $("connection-mode-settings").textContent =
     connectionModeLabels[
@@ -975,8 +977,7 @@ async function loadSessionInfo() {
     if (!loadedPersistentSettings && data.profile?.viewer && !hasSavedSettings)
       applySettings(data.profile.viewer);
     if (data.profile?.clipboardSync && !settings.clipboardSync) {
-      $("clipboard-status").textContent =
-        "配置档允许同步；仍需在本页手动开启。";
+      setClipboardSyncStatus("配置档允许同步；仍需在本页手动开启。", "idle");
     }
   } catch {
     // The connection button provides the visible failure state.
@@ -1009,11 +1010,80 @@ async function writeSystemClipboardText(text) {
     throw new Error("当前环境不支持剪贴板写入");
   return navigator.clipboard.writeText(text);
 }
+const clipboardIndicatorLabels = Object.freeze({
+  idle: ["等待开启", "waiting"],
+  waiting: ["等待连接", "waiting"],
+  active: ["同步中", "active"],
+  outbound: ["本机→远端", "active"],
+  inbound: ["远端→本机", "active"],
+  "outbound-image": ["图片→远端", "active"],
+  "inbound-image": ["图片→本机", "active"],
+  warning: ["图片异常", "warning"],
+  ignored: ["图片已忽略", "warning"],
+  error: ["同步异常", "error"],
+});
+
+function updateClipboardSyncIndicator(
+  activity = clipboardSyncActivity,
+  detail,
+) {
+  clipboardSyncActivity = activity;
+  const indicator = $("clipboard-sync-indicator");
+  if (!settings.clipboardSync) {
+    indicator.hidden = true;
+    indicator.removeAttribute("data-state");
+    indicator.removeAttribute("title");
+    indicator.removeAttribute("aria-label");
+    return;
+  }
+
+  let [label, state] =
+    clipboardIndicatorLabels[activity] || clipboardIndicatorLabels.active;
+  if (!connected) {
+    [label, state] = clipboardIndicatorLabels.waiting;
+  } else if (
+    settings.viewOnly &&
+    ["idle", "active", "outbound", "outbound-image"].includes(activity)
+  ) {
+    label = "只接收";
+    state = "active";
+  }
+  const message = detail || $("clipboard-status").textContent;
+  indicator.hidden = false;
+  indicator.textContent = `剪贴板 · ${label}`;
+  indicator.dataset.state = state;
+  indicator.title = message;
+  indicator.setAttribute("aria-label", message);
+}
+
+function setClipboardSyncStatus(message, activity = "active") {
+  $("clipboard-status").textContent = message;
+  updateClipboardSyncIndicator(activity, message);
+}
+
+function setClipboardImageStatus(message, activity = "active") {
+  $("clipboard-image-status").textContent = message;
+  updateClipboardSyncIndicator(activity, message);
+}
+
 function stopClipboardSync() {
   clearInterval(clipboardTimer);
   clipboardTimer = undefined;
   localClipboardValue = undefined;
   remoteClipboardValue = undefined;
+  updateClipboardSyncIndicator(settings.clipboardSync ? "waiting" : "idle");
+}
+function clipboardImageActivity(status) {
+  return (
+    {
+      started: "active",
+      sent: "outbound-image",
+      received: "inbound-image",
+      failed: "error",
+      "invalid-image": "ignored",
+      "remote-disconnected": "warning",
+    }[status] || "active"
+  );
 }
 function mapClipboardImageStatus(status) {
   return {
@@ -1067,7 +1137,11 @@ function updateClipboardImageSync() {
           "pengux11vnc://clipboard-image-status",
           (event) => {
             const message = mapClipboardImageStatus(event.payload);
-            if (message) $("clipboard-image-status").textContent = message;
+            if (message)
+              setClipboardImageStatus(
+                message,
+                clipboardImageActivity(event.payload),
+              );
           },
         ).catch(() => undefined);
       }
@@ -1078,14 +1152,18 @@ function updateClipboardImageSync() {
         allowSend: !settings.viewOnly,
       });
       clipboardImageSyncActive = true;
-      $("clipboard-image-status").textContent =
-        "图片同步已开启：仅传输 PNG，单张不超过 50 MiB。";
+      setClipboardImageStatus(
+        "图片同步已开启：仅传输 PNG，单张不超过 50 MiB。",
+        "active",
+      );
     } catch {
       clipboardImageSyncActive = false;
       clipboardImageSyncUnlisten?.();
       clipboardImageSyncUnlisten = undefined;
-      $("clipboard-image-status").textContent =
-        "无法启动图片同步；请检查本机剪贴板及远端 wl-clipboard/Python 3。";
+      setClipboardImageStatus(
+        "无法启动图片同步；请检查本机剪贴板及远端 wl-clipboard/Python 3。",
+        "error",
+      );
     }
   });
 }
@@ -1104,27 +1182,37 @@ async function pollClipboard() {
     ) {
       rfb?.clipboardPasteFrom(text);
       localClipboardValue = text;
-      $("clipboard-status").textContent = "已将本机剪贴板发送到远端。";
+      setClipboardSyncStatus("已将本机剪贴板发送到远端。", "outbound");
     }
   } catch (error) {
-    $("clipboard-status").textContent = isTauriShell()
-      ? `无法读取本机剪贴板：${error?.message || error}`
-      : "浏览器未授予剪贴板权限；点击页面后可重试。";
+    setClipboardSyncStatus(
+      isTauriShell()
+        ? `无法读取本机剪贴板：${error?.message || error}`
+        : "浏览器未授予剪贴板权限；点击页面后可重试。",
+      "error",
+    );
   }
 }
 async function startClipboardSync() {
   stopClipboardSync();
   if (!settings.clipboardSync) {
-    $("clipboard-status").textContent = "当前关闭：不会读取或写入本机剪贴板。";
+    setClipboardSyncStatus("当前关闭：不会读取或写入本机剪贴板。", "idle");
     return;
   }
   if (!isTauriShell() && !navigator.clipboard) {
-    $("clipboard-status").textContent = "当前浏览器不支持剪贴板 API。";
+    setClipboardSyncStatus("当前浏览器不支持剪贴板 API。", "error");
     return;
   }
-  $("clipboard-status").textContent = isTauriShell()
-    ? "同步已开启；通过系统剪贴板接口读取本机内容。"
-    : "同步已开启；正在请求本页剪贴板权限。";
+  setClipboardSyncStatus(
+    isTauriShell()
+      ? connected
+        ? "同步已开启；通过系统剪贴板接口读取本机内容。"
+        : "同步已开启；等待连接后读取本机剪贴板。"
+      : connected
+        ? "同步已开启；正在请求本页剪贴板权限。"
+        : "同步已开启；等待连接后请求本页剪贴板权限。",
+    connected ? "active" : "waiting",
+  );
   await pollClipboard();
   clipboardTimer = setInterval(pollClipboard, 1200);
 }
@@ -2533,11 +2621,14 @@ async function connect(prepare = true) {
       localClipboardValue = text;
       try {
         await writeSystemClipboardText(text);
-        $("clipboard-status").textContent = "已将远端剪贴板写入本机。";
+        setClipboardSyncStatus("已将远端剪贴板写入本机。", "inbound");
       } catch (error) {
-        $("clipboard-status").textContent = isTauriShell()
-          ? `远端剪贴板已到达，但系统拒绝写入：${error?.message || error}`
-          : "远端剪贴板已到达，但浏览器拒绝写入本机。";
+        setClipboardSyncStatus(
+          isTauriShell()
+            ? `远端剪贴板已到达，但系统拒绝写入：${error?.message || error}`
+            : "远端剪贴板已到达，但浏览器拒绝写入本机。",
+          "error",
+        );
       }
     });
   } catch (error) {

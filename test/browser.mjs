@@ -353,11 +353,59 @@ try {
   await page.context().grantPermissions(["clipboard-read", "clipboard-write"], {
     origin: new URL(app.url).origin,
   });
+  if (await page.locator("#settings").isHidden())
+    await page.click("#settings-toggle");
+  if (await page.locator("#view-only").isChecked())
+    await page.uncheck("#view-only");
+  await page.evaluate(() =>
+    navigator.clipboard.writeText("clipboard-baseline"),
+  );
+  await page.check("#clipboard-sync");
+  const clipboardIndicator = page.locator("#clipboard-sync-indicator");
+  await page.waitForFunction(
+    () =>
+      !document.querySelector("#clipboard-sync-indicator").hidden &&
+      document
+        .querySelector("#clipboard-sync-indicator")
+        .textContent.includes("同步中"),
+  );
+  await page.waitForTimeout(80);
+  await page.evaluate(() => navigator.clipboard.writeText("local-to-remote"));
+  await page.waitForFunction(() =>
+    document
+      .querySelector("#clipboard-sync-indicator")
+      .textContent.includes("本机→远端"),
+  );
+  assert(
+    mock.events.clipboard.includes("local-to-remote"),
+    "Local clipboard changes must update the footer after sending",
+  );
+  mock.sendClipboard("remote-to-local");
+  await page.waitForFunction(() =>
+    document
+      .querySelector("#clipboard-sync-indicator")
+      .textContent.includes("远端→本机"),
+  );
+  assert.equal(
+    await page.evaluate(() => navigator.clipboard.readText()),
+    "remote-to-local",
+  );
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.waitForTimeout(80);
+  assert.equal(
+    await page
+      .locator("footer")
+      .evaluate((footer) => footer.scrollWidth > footer.clientWidth),
+    false,
+    "The clipboard sync indicator must fit the responsive footer",
+  );
   const localToken = await page.evaluate(() =>
     sessionStorage.getItem("pengux11vnc-token"),
   );
   mock.disconnectClients();
   await page.locator("#disconnect-report-dialog").waitFor({ state: "visible" });
+  assert.equal(await clipboardIndicator.isVisible(), true);
+  assert.match(await clipboardIndicator.textContent(), /等待连接/);
   const disconnectReport = await page
     .locator("#disconnect-report")
     .inputValue();
