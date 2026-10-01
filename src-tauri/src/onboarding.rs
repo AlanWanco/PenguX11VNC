@@ -20,6 +20,7 @@ struct LiveMain {
     target: Value,
     port: u16,
     cleanup_reason: &'static str,
+    rfb_health: RfbHealth,
 }
 
 impl Drop for LiveMain {
@@ -456,6 +457,7 @@ fn spawn_main(profile: &Profile, target: &Value, report: &Value) -> io::Result<L
         target: target.clone(),
         port: local_port,
         cleanup_reason: "startup-failed",
+        rfb_health: RfbHealth::default(),
     };
     let line = rx
         .recv_timeout(Duration::from_secs(15))
@@ -592,6 +594,7 @@ impl ManagerState {
                     target: Value::Null,
                     port: self.profile.local_port(),
                     cleanup_reason: "drop-fallback",
+                    rfb_health: RfbHealth::default(),
                 });
             }
             return Ok(
@@ -599,8 +602,12 @@ impl ManagerState {
                 "profile": self.profile.normalized_json(), "autoRecover": false}),
             );
         }
-        let recover = self.profile.raw["managed"]["autoRecover"] == true;
         let report = probe(&self.profile)?;
+        self.prepare_managed_main(reconnect, &report)
+    }
+
+    fn prepare_managed_main(&mut self, reconnect: bool, report: &Value) -> io::Result<Value> {
+        let recover = self.profile.raw["managed"]["autoRecover"] == true;
         let previous = self
             .onboarding
             .live
@@ -612,11 +619,11 @@ impl ManagerState {
                     .get("managed")
                     .and_then(|v| v.get("target"))
             });
-        let target = choose_target(&report, previous, Some(&self.profile.window_id()));
+        let target = choose_target(report, previous, Some(&self.profile.window_id()));
         let Some(target) = target else {
             self.cleanup_all("target-unavailable");
             return Ok(
-                json!({"state": if !main_candidates(&report).is_empty() { "choose-window" }
+                json!({"state": if !main_candidates(report).is_empty() { "choose-window" }
                 else if report["running"] == true { "waiting-window" } else { "waiting-qq" }, "autoRecover": recover, "managed": true}),
             );
         };
@@ -630,28 +637,53 @@ impl ManagerState {
                 .tunnel
                 .as_mut()
                 .is_some_and(|child| matches!(child.try_wait(), Ok(None)));
-            let rfb_ready =
-                identity_matches && remote_alive && tunnel_alive && check_rfb(live.port);
-            if rfb_ready {
-                return Ok(
-                    json!({"state": "ready", "generation": self.onboarding.generation,
-                    "targetPort": live.port, "profile": self.profile.normalized_json(), "autoRecover": recover, "managed": true}),
-                );
-            }
-            let reason = if !identity_matches {
-                "target-changed"
-            } else if !remote_alive {
-                "supervisor-unavailable"
-            } else if !tunnel_alive {
-                "tunnel-unavailable"
-            } else {
-                "rfb-probe-failed"
-            };
-            diagnostics::log(
-                "main-health-failed",
-                json!({"reason": reason, "identityMatches": identity_matches, "supervisorAlive": remote_alive, "tunnelAlive": tunnel_alive, "rfbReady": rfb_ready, "localPort": live.port}),
+            let probe =
+                (identity_matches && remote_alive && tunnel_alive).then(|| probe_rfb(live.port));
+            let rfb_ready = probe.as_ref().is_some_and(|report| report.ready());
+            let now = Instant::now();
+            let previous_failures = live.rfb_health.failures();
+            let previous_failure_ms = live.rfb_health.failure_for(now).as_millis();
+            let decision = live.rfb_health.evaluate(
+                identity_matches,
+                remote_alive,
+                tunnel_alive,
+                rfb_ready,
+                now,
             );
-            reason
+            let details = json!({
+                "identityMatches": identity_matches, "supervisorAlive": remote_alive,
+                "tunnelAlive": tunnel_alive, "rfbReady": rfb_ready, "localPort": live.port,
+                "probe": probe.as_ref().map(|report| report.diagnostic()),
+                "consecutiveFailures": live.rfb_health.failures(),
+                "failureForMs": live.rfb_health.failure_for(now).as_millis(),
+                "failureThreshold": rfb_health::FAILURE_THRESHOLD,
+                "graceMs": rfb_health::FAILURE_GRACE.as_millis(),
+            });
+            match decision {
+                HealthDecision::Ready | HealthDecision::Suspect => {
+                    if decision == HealthDecision::Suspect {
+                        diagnostics::log("main-health-suspect", details);
+                    } else if previous_failures > 0 {
+                        let mut recovered = details;
+                        recovered["previousFailures"] = json!(previous_failures);
+                        recovered["previousFailureForMs"] = json!(previous_failure_ms);
+                        diagnostics::log("main-health-recovered", recovered);
+                    }
+                    // Keep the owned session, its generation and all child/video
+                    // workers while a same-identity, live-SSH probe is suspect.
+                    return Ok(
+                        json!({"state": "ready", "generation": self.onboarding.generation,
+                        "health": if decision == HealthDecision::Suspect { "suspect" } else { "healthy" },
+                        "targetPort": live.port, "profile": self.profile.normalized_json(), "autoRecover": recover, "managed": true}),
+                    );
+                }
+                HealthDecision::Recover(reason) => {
+                    let mut failed = details;
+                    failed["reason"] = json!(reason);
+                    diagnostics::log("main-health-failed", failed);
+                    reason
+                }
+            }
         } else {
             "initial-connect"
         };
@@ -659,9 +691,9 @@ impl ManagerState {
         if reconnect && !recover {
             return Ok(json!({"state": "disconnected", "autoRecover": false, "managed": true}));
         }
-        update_target(&mut self.profile, &target, &report);
+        update_target(&mut self.profile, &target, report);
         self.profile.raw["managed"]["target"] = target.clone();
-        let live = spawn_main(&self.profile, &target, &report)?;
+        let live = spawn_main(&self.profile, &target, report)?;
         self.onboarding.generation += 1;
         let result = json!({"state": "ready", "generation": self.onboarding.generation,
             "targetPort": live.port, "profile": self.profile.normalized_json(), "autoRecover": recover, "managed": true});
@@ -746,6 +778,173 @@ mod tests {
         let report =
             json!({"windows": [window("0x20", 10)], "processes": [{"pid": 10, "start": "10"}]});
         assert!(choose_target(&report, Some(&old), None).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_grace_preserves_workers_and_sustained_failure_still_cleans_up() {
+        fn fixture_process() -> DiagnosticChild {
+            Command::new("sh")
+                .args(["-c", "while IFS= read -r line; do :; done"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .spawn_diagnostic("test-health-worker")
+                .unwrap()
+        }
+        struct LocalSessions(ManagerState);
+        impl Drop for LocalSessions {
+            fn drop(&mut self) {
+                // Only reap locally spawned fixture processes; never run the
+                // real remote child-VNC cleanup command from this test.
+                for (_, mut session) in self.0.children.drain() {
+                    let _ = session.tunnel.kill();
+                    let _ = session.tunnel.wait();
+                }
+                self.0.videos.clear();
+                self.0.onboarding.stop("test-finished");
+            }
+        }
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let worker = thread::spawn(move || {
+            for greeting in [b"NOPE", b"NOPE", b"RFB ", b"NOPE", b"NOPE"] {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.write_all(greeting).unwrap();
+            }
+        });
+        let target = window("0x10", 10);
+        let report = json!({"running": true, "windows": [target.clone()]});
+        let profile = Profile {
+            id: "health-fixture".into(),
+            raw: json!({"managed": {"enabled": true, "autoRecover": true},
+                "ssh": {"host": "127.0.0.1", "port": 1}, "window": {"id": "0x10"}}),
+        };
+        let mut fixture = LocalSessions(ManagerState::new(profile, true, None));
+        let state = &mut fixture.0;
+        state.onboarding.generation = 42;
+        state.onboarding.live = Some(LiveMain {
+            remote: Some(fixture_process()),
+            tunnel: Some(fixture_process()),
+            target,
+            port,
+            cleanup_reason: "test-finished",
+            rfb_health: RfbHealth::default(),
+        });
+        state.children.insert(
+            "child".into(),
+            ChildSession {
+                info: ChildSessionInfo {
+                    id: "child".into(),
+                    title: "Fixture".into(),
+                    window_id: "0x20".into(),
+                    child: true,
+                    target_port: 1,
+                    local_port: 1,
+                    remote_port: 1,
+                    geometry: WindowInfo {
+                        id: "0x20".into(),
+                        mapped: true,
+                        depth: 1,
+                        x: 0,
+                        y: 0,
+                        width: 1,
+                        height: 1,
+                        pid: None,
+                        start: None,
+                        exe: None,
+                    },
+                },
+                remote_pid: 0,
+                tunnel: fixture_process(),
+            },
+        );
+        for id in ["main", "child"] {
+            let mut child = fixture_process();
+            let (_, messages) = mpsc::channel();
+            let stdin = child.stdin.take();
+            state.videos.insert(
+                id.into(),
+                VideoSession {
+                    child,
+                    stdin,
+                    messages,
+                },
+            );
+        }
+        let supervisor_pid = state
+            .onboarding
+            .live
+            .as_ref()
+            .unwrap()
+            .remote
+            .as_ref()
+            .unwrap()
+            .id();
+        let tunnel_pid = state
+            .onboarding
+            .live
+            .as_ref()
+            .unwrap()
+            .tunnel
+            .as_ref()
+            .unwrap()
+            .id();
+        for (health, failures) in [
+            ("suspect", 1),
+            ("suspect", 2),
+            ("healthy", 0),
+            ("suspect", 1),
+        ] {
+            let result = state.prepare_managed_main(true, &report).unwrap();
+            assert_eq!(result["state"], "ready");
+            assert_eq!(result["health"], health);
+            assert_eq!(result["generation"], 42);
+            assert_eq!(result["targetPort"], port);
+            let live = state.onboarding.live.as_mut().unwrap();
+            assert_eq!(live.rfb_health.failures(), failures);
+            for (child, expected_pid) in [
+                (&mut live.remote, supervisor_pid),
+                (&mut live.tunnel, tunnel_pid),
+            ] {
+                let child = child.as_mut().unwrap();
+                assert_eq!(child.id(), expected_pid);
+                assert!(child.try_wait().unwrap().is_none());
+            }
+            assert_eq!(state.children.len(), 1);
+            assert!(state
+                .children
+                .get_mut("child")
+                .unwrap()
+                .tunnel
+                .try_wait()
+                .unwrap()
+                .is_none());
+            assert_eq!(state.videos.len(), 2);
+            for video in state.videos.values_mut() {
+                assert!(video.child.try_wait().unwrap().is_none());
+                assert!(video.stdin.is_some());
+            }
+        }
+        // Verify the real cleanup branch after both thresholds, without any
+        // remote SSH command: remove/reap the synthetic child locally first.
+        for (_, mut child) in state.children.drain() {
+            let _ = child.tunnel.kill();
+            let _ = child.tunnel.wait();
+        }
+        state.profile.raw["managed"]["autoRecover"] = json!(false);
+        let live = state.onboarding.live.as_mut().unwrap();
+        live.rfb_health = RfbHealth::default();
+        let first = Instant::now() - rfb_health::FAILURE_GRACE;
+        live.rfb_health.evaluate(true, true, true, false, first);
+        live.rfb_health
+            .evaluate(true, true, true, false, first + Duration::from_secs(5));
+        let result = state.prepare_managed_main(true, &report).unwrap();
+        assert_eq!(result["state"], "disconnected");
+        assert_eq!(result["autoRecover"], false);
+        assert!(state.onboarding.live.is_none());
+        assert!(state.videos.is_empty());
+        assert_eq!(state.onboarding.generation, 42);
+        worker.join().unwrap();
     }
 
     #[test]

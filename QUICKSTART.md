@@ -216,6 +216,10 @@ PENGUX11VNC_DEBUG=1 npm run tauri:dev
 
 Tauri 的长期 SSH 会话还会记录 `ssh-spawn`、`ssh-stderr`、`ssh-exit`、`ssh-stop-request` 和 `ssh-kill`，用 `role` 区分主窗口 supervisor、主隧道、子隧道、视频和窗口监听。`main-health-failed` 说明主会话为什么被判定失效；`main-cleanup` / `sessions-cleanup` 说明是主动断开、认证失败、打开配置向导、应用退出、配置保存、窗口身份变化还是 RFB 预检失败触发清理。退出记录包含本机 UTC 时间、PID、退出码/信号及是否已经请求清理；已请求清理只代表时间顺序，不自动证明退出由清理导致。
 
+managed 主窗口健康检查只在窗口身份匹配且 supervisor / tunnel 两个 SSH 进程仍存活时，对 RFB 探测失败提供宽限：至少 **3 次连续失败**，且距首次失败至少 **10 秒**，才在下一次轮询中清理并按原有策略恢复；这是轮询判定，不保证恰好在第 10 秒执行。单次或短暂失败返回 `state=ready, health=suspect`，保留当前会话、generation、视频和子窗口；一次成功立即清空计数和首次失败时间。窗口身份变化、无可安全匹配的窗口、SSH 确认退出或不可检查，以及用户主动断开，都不受此宽限影响。新会话从零开始计数；不开启自动恢复时仍遵守原有停止策略。
+
+`main-health-suspect` 记录暂时异常，`main-health-recovered` 记录探测恢复，`main-health-failed` 才表示决定清理。记录包含 `probe.stage`（connect / greeting / validate-greeting / ready）、失败类别、标准 IO 错误类型、连接/问候/总耗时、连续失败次数、失败持续时间及阈值，不记录原始问候或错误文本。探测只连接本机 localhost；TCP 连接预算仍为 250ms，问候读取总预算仍为 500ms，分片读取不会重新开始预算。提取诊断时请同时包含这三种事件。
+
 managed 主窗口的 x11vnc `stderr` 仅保留已识别的错误类别、X11 错误名、opcode / resource ID、errno / signal，不原样保存未知文本。`vnc-stop` 与 `vnc-exit` 带远端 UTC 时间、退出原因、最终退出码及是否强制结束，并通过 supervisor 的 SSH 错误流汇入 `tauri-manager.log`。本机与远端时间保留各自来源，比较时需考虑两端时钟偏差。每个 SSH 错误流最多记录 64 条普通诊断，每个 x11vnc 最多记录 32 条错误；达到限额后仍持续排空管道，保留最终退出记录及最后识别到的错误摘要（摘要不自动代表退出原因）。管理日志每份最多约 2 MiB，最多保留当前文件及 `.1` 一份轮转；`tauri-server.log` 暂不轮转。不开 debug 时不启动诊断观察线程、不采集 x11vnc 错误流。
 
 Windows 日志目录为 `%APPDATA%\\com.pengux11vnc.app\\`。再次断连后先保留 `tauri-server.log`、`tauri-manager.log` 和存在的 `tauri-manager.log.1`；不要先重启程序，启动会重置当前日志。仅提取相关时间段，勿公开整个应用数据目录。

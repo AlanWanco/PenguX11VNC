@@ -12,6 +12,7 @@ const mock = await startMock();
 let configured = false;
 let multiple = false;
 let remoteState = "ready";
+let remoteHealth = "healthy";
 let saved = 0;
 let draftSaves = 0;
 let preflights = 0;
@@ -94,6 +95,7 @@ const manager = http.createServer(async (req, res) => {
     else polls++;
     data = {
       state: remoteState,
+      health: remoteHealth,
       autoRecover: true,
       managed: true,
       targetPort: mock.port,
@@ -125,6 +127,13 @@ const app = await startServer({
 const browser = await chromium.launch({ channel: "chrome", headless: true });
 const page = await browser.newPage();
 const errors = [];
+let vncOpens = 0;
+let vncCloses = 0;
+page.on("websocket", (socket) => {
+  if (new URL(socket.url()).pathname !== "/vnc") return;
+  vncOpens++;
+  socket.on("close", () => vncCloses++);
+});
 page.on("pageerror", (error) => errors.push(error.message));
 page.on("dialog", (dialog) => {
   errors.push(`Unexpected native browser dialog: ${dialog.type()}`);
@@ -464,6 +473,30 @@ try {
     () => document.querySelector("#status").textContent === "已连接",
   );
   assert.equal(starts, 1);
+  const opensBeforeSuspect = vncOpens;
+  const closesBeforeSuspect = vncCloses;
+  remoteHealth = "suspect";
+  const suspectResponse = await page.waitForResponse(
+    (response) => new URL(response.url()).pathname === "/api/main/poll",
+    { timeout: 12000 },
+  );
+  assert.equal((await suspectResponse.json()).health, "suspect");
+  await page.waitForTimeout(100);
+  assert.equal(await page.locator("#status").textContent(), "已连接");
+  assert.equal(
+    vncOpens,
+    opensBeforeSuspect,
+    "A suspect probe must not reconnect",
+  );
+  assert.equal(
+    vncCloses,
+    closesBeforeSuspect,
+    "A suspect probe must not disconnect",
+  );
+  assert.equal(starts, 1);
+  assert.equal(stops, 0, "A suspect probe must not stop the main session");
+  assert(!(await page.locator("#disconnect-report-dialog").isVisible()));
+  remoteHealth = "healthy";
   remoteState = "waiting-qq";
   await page.waitForFunction(
     () =>
@@ -510,7 +543,7 @@ try {
 
   assert.deepEqual(errors, []);
   console.log(
-    "PASS: single save action, discard navigation, pending-profile home, read-only preflight, themed consent modal, cancel/Esc/pagehide safety, duplicate guard, equal actions, recovery, explicit stop",
+    "PASS: single save action, discard navigation, pending-profile home, read-only preflight, themed consent modal, cancel/Esc/pagehide safety, duplicate guard, equal actions, suspect probe preserves connection, recovery, explicit stop",
   );
 } finally {
   await browser.close();

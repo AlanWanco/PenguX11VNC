@@ -1,6 +1,9 @@
 #[path = "onboarding.rs"]
 mod onboarding;
+#[path = "rfb_health.rs"]
+mod rfb_health;
 use onboarding::Onboarding;
+use rfb_health::{probe_rfb, HealthDecision, RfbHealth};
 
 use crate::clipboard_image::{ClipboardImageSync, StatusCallback, REMOTE_FRAME_PYTHON};
 use crate::diagnostics::{self, DiagnosticChild};
@@ -13,7 +16,7 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::{
@@ -2102,13 +2105,7 @@ fn allocate_port() -> io::Result<u16> {
 }
 
 fn check_rfb(port: u16) -> bool {
-    let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
-    let Ok(mut stream) = TcpStream::connect_timeout(&address, Duration::from_millis(250)) else {
-        return false;
-    };
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
-    let mut greeting = [0_u8; 4];
-    stream.read_exact(&mut greeting).is_ok() && &greeting == b"RFB "
+    probe_rfb(port).ready()
 }
 
 fn wait_for_rfb(port: u16, timeout: Duration) -> io::Result<()> {
