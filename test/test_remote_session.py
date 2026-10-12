@@ -23,6 +23,15 @@ SPEC.loader.exec_module(REMOTE)
 
 
 class RemoteSessionTests(unittest.TestCase):
+    def test_managed_main_x11vnc_preserves_x_server_autorepeat(self) -> None:
+        args = REMOTE.x11vnc_args(
+            {"display": ":0", "xauthority": "/tmp/xauth", "id": "0x123"},
+            "/tmp/vnc.pass",
+        )
+        self.assertIn("-repeat", args)
+        self.assertNotIn("-norepeat", args)
+        self.assertLess(args.index("-repeat"), args.index("-xwarppointer"))
+
     def test_vnc_stderr_keeps_only_error_categories_and_codes(self) -> None:
         self.assertEqual(
             REMOTE.classify_vnc_stderr(

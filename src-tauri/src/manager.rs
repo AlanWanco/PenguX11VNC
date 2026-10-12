@@ -1879,12 +1879,13 @@ fn stop_remote_vnc(profile: &Profile, remote_pid: u32, tunnel: &mut DiagnosticCh
     kill_remote_vnc_process(profile, remote_pid);
 }
 
-fn start_remote_vnc(profile: &Profile, window: &WindowInfo, remote_port: u16) -> io::Result<u32> {
-    let log_path = format!(
-        "/tmp/pengux11vnc-{}.log",
-        window.id.trim_start_matches("0x").to_lowercase()
-    );
-    let args = [
+fn remote_vnc_args(
+    profile: &Profile,
+    window: &WindowInfo,
+    remote_port: u16,
+    log_path: String,
+) -> Vec<String> {
+    vec![
         "nohup".to_string(),
         "x11vnc".to_string(),
         "-display".to_string(),
@@ -1904,10 +1905,20 @@ fn start_remote_vnc(profile: &Profile, window: &WindowInfo, remote_port: u16) ->
         profile.remote_password_file(),
         "-rfbversion".to_string(),
         "3.3".to_string(),
+        // x11vnc defaults to -norepeat, which suppresses X server auto-repeat.
+        "-repeat".to_string(),
         "-xwarppointer".to_string(),
         "-o".to_string(),
         log_path,
-    ];
+    ]
+}
+
+fn start_remote_vnc(profile: &Profile, window: &WindowInfo, remote_port: u16) -> io::Result<u32> {
+    let log_path = format!(
+        "/tmp/pengux11vnc-{}.log",
+        window.id.trim_start_matches("0x").to_lowercase()
+    );
+    let args = remote_vnc_args(profile, window, remote_port, log_path);
     let command = format!(
         "env DISPLAY={} XAUTHORITY={} {} >/dev/null 2>&1 </dev/null & echo $!",
         shell_quote(&profile.display()),
@@ -2646,6 +2657,34 @@ mod clipboard_tests {
 #[cfg(test)]
 mod video_option_tests {
     use super::*;
+
+    #[test]
+    fn child_x11vnc_explicitly_preserves_x_server_autorepeat() {
+        let profile = Profile {
+            id: "fixture".into(),
+            raw: json!({
+                "window": {"display": ":0", "xauthority": "/tmp/xauth"},
+                "vnc": {"remotePasswordFile": "/tmp/vnc.pass"}
+            }),
+        };
+        let window = WindowInfo {
+            id: "0x123".into(),
+            mapped: true,
+            depth: 1,
+            x: 0,
+            y: 0,
+            width: 800,
+            height: 600,
+            pid: None,
+            start: None,
+            exe: None,
+        };
+        let args = remote_vnc_args(&profile, &window, 5901, "/tmp/x11vnc.log".into());
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-repeat", "-xwarppointer"]));
+        assert!(!args.iter().any(|arg| arg == "-norepeat"));
+    }
 
     #[test]
     fn video_options_honor_ui_fps_and_bitrate_bounds() {

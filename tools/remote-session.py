@@ -19,7 +19,7 @@ import stat
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from itertools import pairwise
 from pathlib import Path
 
@@ -41,7 +41,7 @@ def lifecycle_log(event: str, **details: object) -> None:
     if not DEBUG_WINDOWS:
         return
     payload = {
-        "at": datetime.now(timezone.utc)
+        "at": datetime.now(UTC)
         .isoformat(timespec="milliseconds")
         .replace("+00:00", "Z"),
         "event": event,
@@ -732,6 +732,33 @@ def activate(options: dict) -> dict:
         x11.close()
 
 
+def x11vnc_args(target: dict, password: str) -> list[str]:
+    return [
+        "x11vnc",
+        "-display",
+        target["display"],
+        "-auth",
+        target["xauthority"],
+        "-id",
+        target["id"],
+        "-localhost",
+        "-autoport",
+        "5900",
+        "-forever",
+        "-shared",
+        "-noxdamage",
+        "-noshm",
+        "-rfbauth",
+        password,
+        "-rfbversion",
+        "3.3",
+        # x11vnc defaults to -norepeat, which changes auto-repeat on the
+        # shared X server. Keep it enabled for all applications on this display.
+        "-repeat",
+        "-xwarppointer",
+    ]
+
+
 def serve(options: dict) -> None:
     stop_reason = "vnc-exited"
 
@@ -759,27 +786,7 @@ def serve(options: dict) -> None:
     ):
         raise RuntimeError("target-unavailable")
     # The VNC process chooses its own free localhost port and reports PORT=n.
-    args = [
-        "x11vnc",
-        "-display",
-        target["display"],
-        "-auth",
-        target["xauthority"],
-        "-id",
-        target["id"],
-        "-localhost",
-        "-autoport",
-        "5900",
-        "-forever",
-        "-shared",
-        "-noxdamage",
-        "-noshm",
-        "-rfbauth",
-        password,
-        "-rfbversion",
-        "3.3",
-        "-xwarppointer",
-    ]
+    args = x11vnc_args(target, password)
     x11 = X11(target)
     child = subprocess.Popen(
         args,

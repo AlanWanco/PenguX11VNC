@@ -204,7 +204,9 @@ nc -vz 127.0.0.1 15900
 
 开发时注意：`core:default` 不包含窗口 `close`/`destroy` 权限。当前仅额外授予 `core:window:allow-close`，用于主窗口关闭对应子窗口；不要添加仅做清理的 `onCloseRequested` 监听，它会拦截默认关闭并使 Tauri JS 依赖 `destroy` 权限。异步关闭失败必须保留窗口记录，不能把「请求关闭」当作「窗口已销毁」。
 
-### 收集子窗口、鼠标和 VNC 恢复日志
+### XWayland 按键重复
+
+远端 x11vnc 0.9.17 帮助说明默认启用 `-norepeat`：VNC 客户端连接且近期有按键输入时，会关闭对应 X server 的自动重复。managed 主窗口和子窗口启动参数都显式传入 `-repeat`，避免 SSH 只是启动服务却看似改变整个 XWayland 键盘状态。取舍是高延迟时，长按可能出现重复字符；x11vnc 默认该保护正是为规避延迟导致的按键重复问题。
 
 需要复现问题时，启动前临时设置 `PENGUX11VNC_DEBUG=1`：
 
