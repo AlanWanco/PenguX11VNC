@@ -28,6 +28,8 @@ let manualDisconnectPending = false;
 let activeConnectionMode = "vnc";
 let connected = false;
 let connecting = false;
+let connectionStopping = false;
+let connectionStopPromise;
 let connectEpoch = 0;
 let toastTimer;
 let frameObserver;
@@ -2413,7 +2415,14 @@ function cancelConnectionConsent() {
 
 async function connect(prepare = true) {
   await sessionReady;
-  if (rfb || connecting || connectionConsentPending || pageLeaving) return;
+  if (
+    rfb ||
+    connecting ||
+    connectionStopping ||
+    connectionConsentPending ||
+    pageLeaving
+  )
+    return;
   if (setupAvailable && !setupConfigured) {
     toast("连接资料尚未完成预检，请先继续设置连接。");
     return;
@@ -2432,7 +2441,7 @@ async function connect(prepare = true) {
       connectionConsentGranted = true;
     } finally {
       connectionConsentPending = false;
-      if (!rfb && !connecting && !pageLeaving) {
+      if (!rfb && !connecting && !connectionStopping && !pageLeaving) {
         $("connect").disabled = false;
         $("connect").focus();
       }
@@ -2621,7 +2630,7 @@ async function connect(prepare = true) {
       $("password-dialog").close();
       $("password").value = "";
       $("welcome").hidden = false;
-      $("connect").disabled = false;
+      $("connect").disabled = connectionStopping;
       state("已断开", "disconnected");
       $("connection-method").textContent = failure
         ? "视频流失败 · 未连接"
@@ -2670,11 +2679,18 @@ async function connect(prepare = true) {
     state("未连接", "disconnected");
     $("connection-method").textContent = "未连接";
     $("video-status").textContent = "连接方式可在主页选择。";
-    $("connect").disabled = false;
+    $("connect").disabled = connectionStopping;
     setInteractive();
     toast(error.message || "无法建立连接");
   } finally {
     connecting = false;
+    if (
+      !connectionStopping &&
+      !rfb &&
+      !connectionConsentPending &&
+      !pageLeaving
+    )
+      $("connect").disabled = false;
   }
 }
 
@@ -2770,34 +2786,48 @@ async function cleanupOpenedChildSessions() {
   }
 }
 async function stopMainConnection(reason = "user-disconnect") {
+  if (connectionStopPromise) return connectionStopPromise;
   const client = rfb;
+  connectionStopping = true;
   connectionConsentGranted = false;
   cancelConnectionConsent();
   manualDisconnectPending = Boolean(client);
-  void stopVideoStream();
+  const videoCleanup = stopVideoStream();
   connectEpoch++;
   stopChildRecoveryMonitor();
-  $("connect").disabled = false;
+  $("connect").disabled = true;
   connectionWanted = false;
   recoveryEpoch++;
   clearTimeout(recoveryTimer);
   client?.disconnect();
-  await flushSettings();
-  const childrenCleanup = isMainSession
-    ? cleanupOpenedChildSessions()
-    : Promise.resolve(
-        api(`/api/sessions/${encodeURIComponent(sessionId)}`, {
-          method: "DELETE",
-        }).catch(() => {}),
-      );
-  await childrenCleanup;
-  if (setupAvailable)
-    await api("/api/main/stop", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ reason }),
-    });
-  setInteractive();
+  const stopPromise = (async () => {
+    try {
+      await Promise.all([flushSettings(), videoCleanup]);
+      const childrenCleanup = isMainSession
+        ? cleanupOpenedChildSessions()
+        : Promise.resolve(
+            api(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+              method: "DELETE",
+            }).catch(() => {}),
+          );
+      await childrenCleanup;
+      if (setupAvailable)
+        await api("/api/main/stop", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ reason }),
+        });
+      setInteractive();
+    } finally {
+      connectionStopping = false;
+      connectionStopPromise = undefined;
+      if (!rfb && !connecting && !connectionConsentPending && !pageLeaving)
+        $("connect").disabled = false;
+      setInteractive();
+    }
+  })();
+  connectionStopPromise = stopPromise;
+  return stopPromise;
 }
 async function openSetup() {
   try {

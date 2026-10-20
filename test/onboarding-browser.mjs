@@ -18,6 +18,9 @@ let draftSaves = 0;
 let preflights = 0;
 let starts = 0;
 let stops = 0;
+let delayStopResponse = false;
+let signalStopReached;
+let releaseStopResponse;
 const stopReasons = [];
 let polls = 0;
 let pendingProfile;
@@ -105,6 +108,13 @@ const manager = http.createServer(async (req, res) => {
   } else if (req.url === "/main/stop") {
     stops++;
     stopReasons.push(body.reason);
+    if (delayStopResponse) {
+      delayStopResponse = false;
+      signalStopReached?.();
+      await new Promise((resolve) => {
+        releaseStopResponse = resolve;
+      });
+    }
     data = { ok: true };
   } else if (req.url === "/windows") data = { windows: [] };
   else {
@@ -520,8 +530,34 @@ try {
   if (await page.locator("#disconnect-report-dialog").isVisible())
     await page.click("#disconnect-report-close");
   await page.click("#settings-toggle");
+  const stopReached = new Promise((resolve) => {
+    signalStopReached = resolve;
+  });
+  delayStopResponse = true;
   await page.click("#disconnect");
-  await page.waitForTimeout(300);
+  await stopReached;
+  await page.waitForFunction(
+    () => document.querySelector("#status").textContent === "已断开",
+  );
+  assert.equal(
+    await page.locator("#connect").isDisabled(),
+    true,
+    "Reconnect must stay blocked until the previous session has finished stopping",
+  );
+  await page.evaluate(() =>
+    document
+      .querySelector("#connect")
+      .dispatchEvent(new MouseEvent("click", { bubbles: true })),
+  );
+  assert.equal(
+    starts,
+    1,
+    "A programmatic reconnect must not race the pending stop request",
+  );
+  releaseStopResponse?.();
+  await page.waitForFunction(
+    () => !document.querySelector("#connect").disabled,
+  );
   assert.equal(stops, 1);
   assert.deepEqual(stopReasons, ["user-disconnect"]);
   const stoppedPolls = polls;
